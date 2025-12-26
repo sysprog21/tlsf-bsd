@@ -134,13 +134,29 @@ INLINE void block_set_prev_free(tlsf_block_t *block, bool free)
 
 INLINE size_t align_up(size_t x, size_t align)
 {
+    ASSERT(align, "alignment must be non-zero");
     ASSERT(!(align & (align - 1)), "must align to a power of two");
     return (((x - 1) | (align - 1)) + 1);
 }
 
+/*
+ * Align pointer while preserving pointer provenance.
+ *
+ * The naive approach '(char *) align_up((size_t) p, align)' loses provenance
+ * because the integer-to-pointer cast creates a pointer with no derivation
+ * history. This causes issues with Miri, UBSan, and strict aliasing analysis.
+ *
+ * Instead, we compute the alignment offset and use pointer arithmetic:
+ *   p + (aligned_addr - addr)
+ * This preserves provenance because the result is derived from `p`.
+ *
+ * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
+ */
 INLINE char *align_ptr(char *p, size_t align)
 {
-    return (char *) align_up((size_t) p, align);
+    uintptr_t addr = (uintptr_t) p;
+    uintptr_t aligned_addr = align_up(addr, align);
+    return p + (aligned_addr - addr);
 }
 
 INLINE char *block_payload(tlsf_block_t *block)
