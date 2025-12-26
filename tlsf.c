@@ -23,7 +23,7 @@
 #endif
 
 /* First level (FL) and second level (SL) counts */
-#define SL_SHIFT 4
+#define SL_SHIFT 5
 #define SL_COUNT (1U << SL_SHIFT)
 #define FL_MAX _TLSF_FL_MAX
 #define FL_SHIFT (SL_SHIFT + ALIGN_SHIFT)

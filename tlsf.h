@@ -12,13 +12,18 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
-#define _TLSF_SL_COUNT 16
+/*
+ * Second-level subdivisions: 32 bins per first-level class.
+ * This provides +6.25% average internal fragmentation (vs +12.5% with 16).
+ * Control structure size increases ~2x for the block pointer array.
+ */
+#define _TLSF_SL_COUNT 32
 #if __SIZE_WIDTH__ == 64
 #define _TLSF_FL_COUNT 32
-#define _TLSF_FL_MAX 38
+#define _TLSF_FL_MAX 39
 #else
 #define _TLSF_FL_COUNT 25
-#define _TLSF_FL_MAX 30
+#define _TLSF_FL_MAX 31
 #endif
 #define TLSF_MAX_SIZE (((size_t) 1 << (_TLSF_FL_MAX - 1)) - sizeof(size_t))
 #define TLSF_INIT ((tlsf_t) {.size = 0})

@@ -152,15 +152,27 @@ static void large_size_test(tlsf_t *t)
     printf("Large allocation test: ");
     fflush(stdout);
 
+    /*
+     * Cap test size to fit within test pool limits.
+     * 64-bit: up to 256MB, 32-bit: up to 32MB (pool is 128MB)
+     */
+#if __SIZE_WIDTH__ == 64 || defined(__LP64__) || defined(_LP64)
+    size_t max_test = (size_t) 1 << 28; /* 256 MB */
+#else
+    size_t max_test = (size_t) 1 << 25; /* 32 MB */
+#endif
+    if (max_test > TLSF_MAX_SIZE)
+        max_test = TLSF_MAX_SIZE;
+
     size_t s = 1;
-    while (s <= TLSF_MAX_SIZE) {
+    while (s <= max_test) {
         large_alloc(t, s);
         s *= 2;
     }
     printf(".");
     fflush(stdout);
 
-    s = TLSF_MAX_SIZE;
+    s = max_test;
     while (s > 0) {
         large_alloc(t, s);
         s /= 2;
@@ -201,10 +213,103 @@ static void append_pool_test(tlsf_t *t)
     printf("done\n");
 }
 
+/*
+ * Test internal fragmentation by allocating various sizes and measuring
+ * the overhead. With SL=32, max internal fragmentation should be ~3.125%
+ * (1/32) compared to ~6.25% (1/16) with SL=16.
+ */
+static void fragmentation_test(tlsf_t *t)
+{
+    printf("Internal fragmentation test:\n");
+
+    /*
+     * Split into "small" (affected by min block size) and "large" (where
+     * SL subdivision is the primary factor). BLOCK_SIZE_SMALL is 256 on
+     * 64-bit with SL=32.
+     */
+    const size_t small_sizes[] = {17, 31, 33, 47, 63, 65, 95, 127};
+    const size_t large_sizes[] = {
+        257,  400,  511,  513,   800,   1000,  1500,  2000,  3000,
+        4000, 5000, 7000, 10000, 15000, 20000, 30000, 50000, 100000,
+    };
+
+    double small_total = 0.0, large_total = 0.0, large_max = 0.0;
+    size_t large_worst = 0;
+    size_t small_count = sizeof(small_sizes) / sizeof(small_sizes[0]);
+    size_t large_count = sizeof(large_sizes) / sizeof(large_sizes[0]);
+
+    /* Test small sizes (high overhead expected due to min block size) */
+    for (size_t i = 0; i < small_count; i++) {
+        tlsf_stats_t before, after;
+        tlsf_get_stats(t, &before);
+        void *ptr = tlsf_malloc(t, small_sizes[i]);
+        assert(ptr);
+        tlsf_get_stats(t, &after);
+        size_t actual = after.total_used - before.total_used;
+        small_total += 100.0 * (double) (actual - small_sizes[i]) /
+                       (double) small_sizes[i];
+        tlsf_free(t, ptr);
+    }
+
+    /* Test large sizes (SL subdivision is the limiting factor) */
+    for (size_t i = 0; i < large_count; i++) {
+        tlsf_stats_t before, after;
+        tlsf_get_stats(t, &before);
+        void *ptr = tlsf_malloc(t, large_sizes[i]);
+        assert(ptr);
+        tlsf_get_stats(t, &after);
+        size_t actual = after.total_used - before.total_used;
+        double pct = 100.0 * (double) (actual - large_sizes[i]) /
+                     (double) large_sizes[i];
+        large_total += pct;
+        if (pct > large_max) {
+            large_max = pct;
+            large_worst = large_sizes[i];
+        }
+        tlsf_free(t, ptr);
+    }
+
+    double small_avg = small_total / (double) small_count;
+    double large_avg = large_total / (double) large_count;
+
+    printf("  SL subdivisions: %u\n", _TLSF_SL_COUNT);
+    printf("  Small sizes (<256B) avg overhead: %.2f%%\n", small_avg);
+    printf("  Large sizes (>=256B) avg overhead: %.2f%%\n", large_avg);
+    printf("  Large sizes max overhead: %.2f%% (size=%zu)\n", large_max,
+           large_worst);
+
+    /*
+     * Validate SL subdivision improvement:
+     * - SL=32: theoretical max 1/32 = 3.125%, allow < 5% for alignment
+     * - SL=16: theoretical max 1/16 = 6.25%, allow < 8%
+     */
+    if (_TLSF_SL_COUNT == 32) {
+        assert(large_max < 5.0 && "large size max overhead exceeds 5%");
+        assert(large_avg < 3.0 && "large size avg overhead exceeds 3%");
+        printf("  [PASS] SL=32 validated: max<5%%, avg<3%%\n");
+    } else if (_TLSF_SL_COUNT == 16) {
+        assert(large_max < 8.0 && "large size max overhead exceeds 8%");
+        assert(large_avg < 5.0 && "large size avg overhead exceeds 5%");
+        printf("  [PASS] SL=16 validated: max<8%%, avg<5%%\n");
+    }
+
+    tlsf_check(t);
+    printf("done\n");
+}
+
 int main(void)
 {
     PAGE = (size_t) sysconf(_SC_PAGESIZE);
-    MAX_PAGES = 20 * TLSF_MAX_SIZE / PAGE;
+    /*
+     * Virtual address space reservation for testing.
+     * 64-bit: 1GB is sufficient and safe
+     * 32-bit: 128MB to avoid VA space exhaustion (user space is 2-3GB)
+     */
+#if __SIZE_WIDTH__ == 64 || defined(__LP64__) || defined(_LP64)
+    MAX_PAGES = ((size_t) 1 << 30) / PAGE; /* 1 GB */
+#else
+    MAX_PAGES = ((size_t) 128 << 20) / PAGE; /* 128 MB */
+#endif
     tlsf_t t = TLSF_INIT;
     srand((unsigned int) time(0));
 
@@ -214,6 +319,9 @@ int main(void)
 
     /* Run pool append test */
     append_pool_test(&t);
+
+    /* Run fragmentation validation test */
+    fragmentation_test(&t);
 
     puts("OK!");
     return 0;

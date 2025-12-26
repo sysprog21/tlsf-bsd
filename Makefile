@@ -32,9 +32,9 @@ $(OUT)/%.o: %.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
 
-CMDSEP = ; echo "Please wait..." ;
 check: $(TARGETS)
-	MALLOC_CHECK_=3 $(foreach prog,$(TARGETS),./$(prog) $(CMDSEP))
+	MALLOC_CHECK_=3 ./build/test
+	MALLOC_CHECK_=3 ./build/bench
 
 clean:
 	$(RM) $(TARGETS) $(OBJS) $(deps)
