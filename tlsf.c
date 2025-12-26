@@ -485,9 +485,11 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     if (start != current_pool_end)
         return 0;
 
-    /* Update the pool size first to include the new memory */
+    /* Update the pool size first to include the new memory.
+     * We need aligned_size for payload + BLOCK_OVERHEAD for new sentinel.
+     */
     size_t old_size = t->size;
-    size_t new_total_size = t->size + aligned_size;
+    size_t new_total_size = t->size + aligned_size + BLOCK_OVERHEAD;
 
     /* Try to resize the pool to include the new memory */
     void *resized_pool = tlsf_resize(t, new_total_size);
@@ -512,13 +514,17 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
         block_remove(t, last_block);
     }
 
-    /* Calculate the new free block size */
-    size_t new_free_size =
-        aligned_size + BLOCK_OVERHEAD; /* Include old sentinel space */
+    /* Calculate the new free block size.
+     * The old sentinel header becomes the new block's header (not payload).
+     * Payload is just the appended memory.
+     */
+    size_t new_free_size = aligned_size;
     tlsf_block_t *new_free_block;
 
     if (last_block) {
-        /* Merge with the existing free block */
+        /* Merge with the existing free block.
+         * Absorb: last_block payload + old sentinel header + new memory.
+         */
         new_free_size += block_size(last_block) + BLOCK_OVERHEAD;
         new_free_block = last_block;
     } else {
@@ -722,9 +728,15 @@ size_t tlsf_append_pool(tlsf_t *t, void *mem, size_t size)
  * Note: Uses stack allocation for reentrancy safety across multiple instances.
  * Table size of 2048 supports heaps with up to ~1400 free blocks (70% load).
  * For heaps exceeding this, the check is silently skipped.
+ *
+ * For embedded systems with limited stack, define TLSF_CHECK_TABLE_SIZE
+ * to a smaller power-of-2 value (e.g., 256 for 2KB stack usage on 64-bit).
  */
-#define DUP_CHECK_TABLE_SIZE 2048
-#define DUP_CHECK_MAX_LOAD 1433 /* ~70% of 2048 */
+#ifndef TLSF_CHECK_TABLE_SIZE
+#define TLSF_CHECK_TABLE_SIZE 2048
+#endif
+#define DUP_CHECK_TABLE_SIZE TLSF_CHECK_TABLE_SIZE
+#define DUP_CHECK_MAX_LOAD ((DUP_CHECK_TABLE_SIZE * 70) / 100)
 static void check_no_duplicates(tlsf_t *t, size_t free_count)
 {
     /* Skip check if too many free blocks - would exceed hash table capacity */
@@ -763,51 +775,209 @@ static void check_no_duplicates(tlsf_t *t, size_t free_count)
 }
 #undef DUP_CHECK_MAX_LOAD
 #undef DUP_CHECK_TABLE_SIZE
+/* Note: TLSF_CHECK_TABLE_SIZE is user-configurable, not undef'd */
 
+/**
+ * Check if a block is in the free list at the expected FL/SL bin.
+ */
+static bool block_in_free_list(tlsf_t *t, tlsf_block_t *target)
+{
+    uint32_t fl, sl;
+    mapping(block_size(target), &fl, &sl);
+
+    tlsf_block_t *block = t->block[fl][sl];
+    while (block) {
+        if (block == target)
+            return true;
+        block = block->next_free;
+    }
+    return false;
+}
+
+/**
+ * Comprehensive heap consistency check.
+ *
+ * Validates ALL block invariants by walking the entire heap:
+ * 1. Block walk validation (all blocks from pool start to sentinel)
+ * 2. Free list validation (bitmap consistency, coalescing)
+ * 3. Cross-validation (free list count matches block walk count)
+ * 4. Prev pointer validation (linkage consistency)
+ * 5. Size/alignment invariants
+ */
 void tlsf_check(tlsf_t *t)
 {
-    size_t free_count = 0;
+    CHECK(t, "tlsf_t pointer is null");
+
+    /* Empty pool is valid */
+    if (!t->size)
+        return;
+
+    /* Get arena start via tlsf_resize with current size */
+    void *arena_start = tlsf_resize(t, t->size);
+    CHECK(arena_start, "failed to get arena pointer");
+    CHECK((size_t) arena_start % ALIGN_SIZE == 0, "arena not aligned");
+
+    /*
+     * Phase 1: Walk ALL blocks from pool start to sentinel
+     * This validates the physical block chain integrity
+     *
+     * The first block is at arena_start - BLOCK_OVERHEAD because the
+     * tlsf_block_t structure's prev field precedes the header, but for
+     * the first block, the prev field is outside the arena (never accessed).
+     */
+    tlsf_block_t *block = to_block((char *) arena_start - BLOCK_OVERHEAD);
+    tlsf_block_t *prev_block = NULL;
+    size_t walk_free_count = 0;
+    size_t total_size = 0;
+    bool prev_was_free = false;
+
+    while (block_size(block) != 0) {
+        size_t bsize = block_size(block);
+
+        /* Size invariants */
+        CHECK(bsize >= BLOCK_SIZE_MIN, "block smaller than minimum size");
+        CHECK(bsize <= BLOCK_SIZE_MAX, "block exceeds maximum size");
+        CHECK(bsize % ALIGN_SIZE == 0, "block size not aligned");
+
+        /* Pointer alignment check */
+        CHECK((size_t) block % ALIGN_SIZE == 0, "block pointer not aligned");
+        CHECK((size_t) block_payload(block) % ALIGN_SIZE == 0,
+              "payload not aligned");
+
+        /* Prev pointer validation */
+        if (prev_block) {
+            CHECK(block_is_prev_free(block) == prev_was_free,
+                  "prev_free bit mismatch with actual previous block state");
+            if (prev_was_free) {
+                CHECK(block->prev == prev_block,
+                      "prev pointer doesn't match previous block");
+            }
+        }
+
+        if (block_is_free(block)) {
+            walk_free_count++;
+
+            /* Free block must be in free list */
+            CHECK(block_in_free_list(t, block),
+                  "free block not found in free list");
+
+            /* Coalescing invariant: no two consecutive free blocks */
+            CHECK(!prev_was_free,
+                  "consecutive free blocks (coalescing failed)");
+
+            /* Note: Free list linkage is validated in Phase 2 */
+            prev_was_free = true;
+        } else {
+            prev_was_free = false;
+        }
+
+        total_size += bsize + BLOCK_OVERHEAD;
+        prev_block = block;
+        block = block_next(block);
+    }
+
+    /* Sentinel validation */
+    CHECK(block_size(block) == 0, "sentinel has non-zero size");
+    CHECK(!block_is_free(block), "sentinel marked as free");
+    CHECK(block_is_prev_free(block) == prev_was_free,
+          "sentinel prev_free bit mismatch");
+    if (prev_was_free && prev_block) {
+        CHECK(block->prev == prev_block, "sentinel prev pointer incorrect");
+    }
+
+    /* Account for sentinel header */
+    total_size += BLOCK_OVERHEAD;
+    CHECK(total_size == t->size, "block sizes don't sum to pool size");
+
+    /*
+     * Phase 2: Walk free lists and validate bitmap consistency
+     */
+    size_t list_free_count = 0;
 
     for (uint32_t i = 0; i < FL_COUNT; ++i) {
+        uint32_t fl_bit = t->fl & (1U << i);
+        uint32_t sl_list = t->sl[i];
+
+        /* If FL bit is clear, all SL bits and block pointers must be null */
+        if (!fl_bit) {
+            CHECK(sl_list == 0, "SL bitmap non-zero but FL bit is clear");
+            for (uint32_t j = 0; j < SL_COUNT; ++j) {
+                CHECK(t->block[i][j] == NULL,
+                      "block pointer non-null but FL bit is clear");
+            }
+            continue;
+        }
+
+        /* FL bit is set, so at least one SL bit must be set */
+        CHECK(sl_list != 0, "FL bit set but SL bitmap is empty");
+
         for (uint32_t j = 0; j < SL_COUNT; ++j) {
-            size_t fl_map = t->fl & (1U << i), sl_list = t->sl[i],
-                   sl_map = sl_list & (1U << j);
-            tlsf_block_t *block = t->block[i][j];
+            uint32_t sl_bit = sl_list & (1U << j);
+            tlsf_block_t *list_block = t->block[i][j];
 
-            /* Check that first- and second-level lists agree. */
-            if (!fl_map)
-                CHECK(!sl_map, "second-level map must be null");
-
-            if (!sl_map) {
-                CHECK(!block, "block list must be null");
+            if (!sl_bit) {
+                CHECK(!list_block,
+                      "block pointer non-null but SL bit is clear");
                 continue;
             }
 
-            /* Check that there is at least one free block. */
-            CHECK(sl_list, "no free blocks in second-level map");
+            /* SL bit is set, so block list must be non-empty */
+            CHECK(list_block, "SL bit set but block list is empty");
 
-            while (block) {
+            /* Walk the free list for this bin */
+            tlsf_block_t *list_prev = NULL;
+            while (list_block) {
+                list_free_count++;
+
+                /* Block must be free */
+                CHECK(block_is_free(list_block), "block in free list not free");
+
+                /* Block must be in correct bin */
                 uint32_t fl, sl;
-                CHECK(block_is_free(block), "block should be free");
-                CHECK(!block_is_prev_free(block),
-                      "blocks should have coalesced");
-                CHECK(!block_is_free(block_next(block)),
-                      "blocks should have coalesced");
-                CHECK(block_is_prev_free(block_next(block)),
-                      "block should be free");
-                CHECK(block_size(block) >= BLOCK_SIZE_MIN,
-                      "block not minimum size");
+                mapping(block_size(list_block), &fl, &sl);
+                CHECK(fl == i && sl == j, "block in wrong FL/SL bin");
 
-                mapping(block_size(block), &fl, &sl);
-                CHECK(fl == i && sl == j, "block size indexed in wrong list");
-                block = block->next_free;
-                free_count++;
+                /* Size constraints */
+                CHECK(block_size(list_block) >= BLOCK_SIZE_MIN,
+                      "free block below minimum size");
+
+                /* Coalescing: previous physical block must not be free */
+                CHECK(!block_is_prev_free(list_block),
+                      "free block has free predecessor (coalescing violated)");
+
+                /* Coalescing: next physical block must not be free */
+                tlsf_block_t *next_phys = block_next(list_block);
+                CHECK(!block_is_free(next_phys),
+                      "free block has free successor (coalescing violated)");
+
+                /* Next block must have prev_free set */
+                CHECK(block_is_prev_free(next_phys),
+                      "next block doesn't know this block is free");
+
+                /* Free list linkage */
+                CHECK(list_block->prev_free == list_prev,
+                      "free list prev pointer incorrect");
+                if (list_prev) {
+                    CHECK(list_prev->next_free == list_block,
+                          "free list next pointer incorrect");
+                }
+
+                list_prev = list_block;
+                list_block = list_block->next_free;
             }
         }
     }
 
-    /* Check for duplicates in free lists (double-free detection) */
-    check_no_duplicates(t, free_count);
+    /*
+     * Phase 3: Cross-validation
+     */
+    CHECK(walk_free_count == list_free_count,
+          "free block count mismatch between block walk and free list walk");
+
+    /*
+     * Phase 4: Duplicate detection (double-free)
+     */
+    check_no_duplicates(t, list_free_count);
 }
 #endif
 
@@ -843,12 +1013,15 @@ int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
      * Get arena start via tlsf_resize with current size.
      * Contract: tlsf_resize(t, t->size) must return current arena pointer
      * without reallocation or side effects.
+     *
+     * The first block is at arena_start - BLOCK_OVERHEAD because the
+     * tlsf_block_t structure's prev field precedes the header.
      */
     void *arena_start = tlsf_resize(t, t->size);
     if (!arena_start)
         return -1;
 
-    tlsf_block_t *block = to_block(arena_start);
+    tlsf_block_t *block = to_block((char *) arena_start - BLOCK_OVERHEAD);
 
     while (block_size(block) != 0) {
         size_t bsize = block_size(block);
