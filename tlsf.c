@@ -714,8 +714,60 @@ size_t tlsf_append_pool(tlsf_t *t, void *mem, size_t size)
             abort();                                              \
         }                                                         \
     })
+
+/**
+ * Check for duplicate blocks in free lists (double-free detection).
+ * Uses hash-set approach for O(n) complexity.
+ *
+ * Note: Uses stack allocation for reentrancy safety across multiple instances.
+ * Table size of 2048 supports heaps with up to ~1400 free blocks (70% load).
+ * For heaps exceeding this, the check is silently skipped.
+ */
+#define DUP_CHECK_TABLE_SIZE 2048
+#define DUP_CHECK_MAX_LOAD 1433 /* ~70% of 2048 */
+static void check_no_duplicates(tlsf_t *t, size_t free_count)
+{
+    /* Skip check if too many free blocks - would exceed hash table capacity */
+    if (free_count > DUP_CHECK_MAX_LOAD)
+        return;
+
+    /* Stack allocation for reentrancy - 16KB on 64-bit systems */
+    tlsf_block_t *seen[DUP_CHECK_TABLE_SIZE];
+
+    /* Clear the table */
+    memset(seen, 0, sizeof(seen));
+
+    for (uint32_t i = 0; i < FL_COUNT; ++i) {
+        for (uint32_t j = 0; j < SL_COUNT; ++j) {
+            tlsf_block_t *block = t->block[i][j];
+            while (block) {
+                /* Hash the pointer using golden ratio for better distribution
+                 */
+                size_t hash = (((size_t) block >> 4) * 2654435769UL) %
+                              DUP_CHECK_TABLE_SIZE;
+                size_t orig_hash = hash;
+
+                /* Linear probe to find empty slot or duplicate */
+                while (seen[hash]) {
+                    CHECK(seen[hash] != block,
+                          "duplicate block in free list (double-free?)");
+                    hash = (hash + 1) % DUP_CHECK_TABLE_SIZE;
+                    CHECK(hash != orig_hash, "hash table unexpectedly full");
+                }
+
+                seen[hash] = block;
+                block = block->next_free;
+            }
+        }
+    }
+}
+#undef DUP_CHECK_MAX_LOAD
+#undef DUP_CHECK_TABLE_SIZE
+
 void tlsf_check(tlsf_t *t)
 {
+    size_t free_count = 0;
+
     for (uint32_t i = 0; i < FL_COUNT; ++i) {
         for (uint32_t j = 0; j < SL_COUNT; ++j) {
             size_t fl_map = t->fl & (1U << i), sl_list = t->sl[i],
@@ -749,8 +801,74 @@ void tlsf_check(tlsf_t *t)
                 mapping(block_size(block), &fl, &sl);
                 CHECK(fl == i && sl == j, "block size indexed in wrong list");
                 block = block->next_free;
+                free_count++;
             }
         }
     }
+
+    /* Check for duplicates in free lists (double-free detection) */
+    check_no_duplicates(t, free_count);
 }
 #endif
+
+/**
+ * Collect heap statistics by walking all blocks.
+ *
+ * Note: This function relies on tlsf_resize(t, t->size) being idempotent
+ * (returning the current arena address without reallocation). The platform-
+ * specific tlsf_resize implementation must honor this contract.
+ *
+ * Statistics semantics:
+ * - total_free/total_used: Payload bytes (usable by application)
+ * - overhead: Metadata bytes (block headers + sentinel)
+ * - block_count: Total blocks including used and free
+ * - free_count: Number of free blocks (fragmentation indicator)
+ */
+int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
+{
+    if (!t || !stats)
+        return -1;
+
+    stats->total_free = 0;
+    stats->largest_free = 0;
+    stats->total_used = 0;
+    stats->block_count = 0;
+    stats->free_count = 0;
+    stats->overhead = 0;
+
+    if (!t->size)
+        return 0; /* Empty pool */
+
+    /*
+     * Get arena start via tlsf_resize with current size.
+     * Contract: tlsf_resize(t, t->size) must return current arena pointer
+     * without reallocation or side effects.
+     */
+    void *arena_start = tlsf_resize(t, t->size);
+    if (!arena_start)
+        return -1;
+
+    tlsf_block_t *block = to_block(arena_start);
+
+    while (block_size(block) != 0) {
+        size_t bsize = block_size(block);
+        stats->block_count++;
+        stats->overhead += BLOCK_OVERHEAD;
+
+        if (block_is_free(block)) {
+            stats->free_count++;
+            stats->total_free += bsize;
+            if (bsize > stats->largest_free)
+                stats->largest_free = bsize;
+        } else {
+            stats->total_used += bsize;
+        }
+
+        block = block_next(block);
+    }
+
+    /* Account for sentinel block overhead */
+    stats->overhead += BLOCK_OVERHEAD;
+
+    return 0;
+}

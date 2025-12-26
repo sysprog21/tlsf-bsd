@@ -65,6 +65,26 @@ static inline void tlsf_check(tlsf_t *t)
 }
 #endif
 
+/**
+ * Heap statistics structure for monitoring allocator state.
+ */
+typedef struct {
+    size_t total_free;   /* Total free bytes available */
+    size_t largest_free; /* Largest contiguous free block */
+    size_t total_used;   /* Total bytes in allocated blocks */
+    size_t block_count;  /* Total number of blocks (free + used) */
+    size_t free_count;   /* Number of free blocks (fragmentation indicator) */
+    size_t overhead;     /* Metadata overhead bytes */
+} tlsf_stats_t;
+
+/**
+ * Collect heap statistics by walking all blocks.
+ * @param t The TLSF allocator instance
+ * @param stats Output structure to fill with statistics
+ * @return 0 on success, -1 if t or stats is NULL
+ */
+int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats);
+
 #ifdef __cplusplus
 }
 #endif

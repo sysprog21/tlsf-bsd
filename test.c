@@ -116,20 +116,20 @@ static void random_sizes_test(tlsf_t *t)
 {
     const size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 1024 * 1024};
 
+    printf("Random allocation test: ");
     for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
         unsigned n = 1024;
 
-        while (n--) {
-            size_t cap = (size_t) rand() % sizes[i] + 1;
-            printf("sizes = %zu, cap = %zu\n", sizes[i], cap);
-            random_test(t, sizes[i], cap);
-        }
+        while (n--)
+            random_test(t, sizes[i], (size_t) rand() % sizes[i] + 1);
+        printf(".");
+        fflush(stdout);
     }
+    printf(" done\n");
 }
 
 static void large_alloc(tlsf_t *t, size_t s)
 {
-    printf("large alloc %zu\n", s);
     for (size_t d = 0; d < 100 && d < s; ++d) {
         void *p = tlsf_malloc(t, s - d);
         assert(p);
@@ -149,22 +149,29 @@ static void large_alloc(tlsf_t *t, size_t s)
 
 static void large_size_test(tlsf_t *t)
 {
+    printf("Large allocation test: ");
+    fflush(stdout);
+
     size_t s = 1;
     while (s <= TLSF_MAX_SIZE) {
         large_alloc(t, s);
         s *= 2;
     }
+    printf(".");
+    fflush(stdout);
 
     s = TLSF_MAX_SIZE;
     while (s > 0) {
         large_alloc(t, s);
         s /= 2;
     }
+    printf(". done\n");
 }
 
 static void append_pool_test(tlsf_t *t)
 {
-    printf("Pool append functionality test\n");
+    printf("Pool append test: ");
+    fflush(stdout);
 
     /* Simple test: Initial allocation */
     void *ptr1 = tlsf_malloc(t, 1000);
@@ -177,16 +184,10 @@ static void append_pool_test(tlsf_t *t)
     size_t appended = tlsf_append_pool(t, append_addr, 4096);
 
     if (appended > 0) {
-        printf("Pool append successful: %zu bytes added\n", appended);
-
         /* Test large allocation from expanded pool */
         void *large_ptr = tlsf_malloc(t, 3000);
-        if (large_ptr) {
-            printf("Large allocation from expanded pool successful\n");
+        if (large_ptr)
             tlsf_free(t, large_ptr);
-        }
-    } else {
-        printf("Pool append not possible (non-adjacent memory)\n");
     }
 
     /* Test non-adjacent append (should fail) */
@@ -194,11 +195,10 @@ static void append_pool_test(tlsf_t *t)
     size_t non_adjacent =
         tlsf_append_pool(t, separate_memory, sizeof(separate_memory));
     assert(non_adjacent == 0);
-    printf("Non-adjacent append correctly rejected\n");
 
     tlsf_free(t, ptr1);
     tlsf_check(t);
-    printf("Pool append test completed\n");
+    printf("done\n");
 }
 
 int main(void)
