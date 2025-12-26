@@ -98,6 +98,7 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         size_t target = (size_t) rand() % i;
         if (p[target] == NULL)
             continue;
+
         uint8_t *data = (uint8_t *) p[target];
         assert(data[0] == 0xa5);
         tlsf_free(t, p[target]);
@@ -152,8 +153,7 @@ static void large_size_test(tlsf_t *t)
     printf("Large allocation test: ");
     fflush(stdout);
 
-    /*
-     * Cap test size to fit within test pool limits.
+    /* Cap test size to fit within test pool limits.
      * 64-bit: up to 256MB, 32-bit: up to 32MB (pool is 128MB)
      */
 #if __SIZE_WIDTH__ == 64 || defined(__LP64__) || defined(_LP64)
@@ -213,8 +213,7 @@ static void append_pool_test(tlsf_t *t)
     printf("done\n");
 }
 
-/*
- * Test internal fragmentation by allocating various sizes and measuring
+/* Test internal fragmentation by allocating various sizes and measuring
  * the overhead. With SL=32, max internal fragmentation should be ~3.125%
  * (1/32) compared to ~6.25% (1/16) with SL=16.
  */
@@ -278,8 +277,7 @@ static void fragmentation_test(tlsf_t *t)
     printf("  Large sizes max overhead: %.2f%% (size=%zu)\n", large_max,
            large_worst);
 
-    /*
-     * Validate SL subdivision improvement:
+    /* Validate SL subdivision improvement:
      * - SL=32: theoretical max 1/32 = 3.125%, allow < 5% for alignment
      * - SL=16: theoretical max 1/16 = 6.25%, allow < 8%
      */
@@ -297,11 +295,191 @@ static void fragmentation_test(tlsf_t *t)
     printf("done\n");
 }
 
+/* Test backward expansion optimization in realloc.
+ *
+ * When growing an allocation and the next block is unavailable,
+ * realloc should try expanding into the previous free block,
+ * moving data with memmove instead of malloc+memcpy+free.
+ */
+static void realloc_backward_test(tlsf_t *t)
+{
+    printf("Realloc backward expansion test: ");
+    fflush(stdout);
+
+    /* Test 1: Simple backward expansion
+     * Allocate A, B, C in sequence, free A, then grow B.
+     * B should expand backward into A's space.
+     */
+    {
+        const size_t size_a = 512;
+        const size_t size_b = 256;
+        const size_t size_c = 128;
+
+        void *a = tlsf_malloc(t, size_a);
+        void *b = tlsf_malloc(t, size_b);
+        void *c = tlsf_malloc(t, size_c);
+        assert(a && b && c);
+
+        /* Fill B with pattern to verify data integrity after move */
+        memset(b, 0xAB, size_b);
+
+        /* Free A to create a free block before B */
+        tlsf_free(t, a);
+        tlsf_check(t);
+
+        /* Grow B beyond its current size. Next block (C) is used,
+         * so backward expansion should be triggered.
+         */
+        size_t new_size = size_a + size_b - 32; /* Fits in prev+current */
+        void *new_b = tlsf_realloc(t, b, new_size);
+        assert(new_b);
+        tlsf_check(t);
+
+        /* Verify data integrity (first size_b bytes should be 0xAB) */
+        uint8_t *data = (uint8_t *) new_b;
+        for (size_t i = 0; i < size_b; i++)
+            assert(data[i] == 0xAB);
+
+        /* The new pointer should be at A's original location (backward) */
+        assert(new_b == a);
+
+        tlsf_free(t, new_b);
+        tlsf_free(t, c);
+        tlsf_check(t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 2: Backward + forward expansion (both neighbors free)
+     * Allocate A, B, C, D, free A and C, then grow B.
+     * B should merge with both A and C.
+     */
+    {
+        const size_t size_a = 512;
+        const size_t size_b = 256;
+        const size_t size_c = 512;
+        const size_t size_d = 128;
+
+        void *a = tlsf_malloc(t, size_a);
+        void *b = tlsf_malloc(t, size_b);
+        void *c = tlsf_malloc(t, size_c);
+        void *d = tlsf_malloc(t, size_d);
+        assert(a && b && c && d);
+
+        /* Fill B with pattern */
+        memset(b, 0xCD, size_b);
+
+        /* Free both A and C */
+        tlsf_free(t, a);
+        tlsf_free(t, c);
+        tlsf_check(t);
+
+        /* Request size that needs both prev and next */
+        size_t new_size = size_a + size_b + size_c - 64;
+        void *new_b = tlsf_realloc(t, b, new_size);
+        assert(new_b);
+        tlsf_check(t);
+
+        /* Verify data integrity */
+        uint8_t *data = (uint8_t *) new_b;
+        for (size_t i = 0; i < size_b; i++)
+            assert(data[i] == 0xCD);
+
+        /* Pointer should be at A's location */
+        assert(new_b == a);
+
+        tlsf_free(t, new_b);
+        tlsf_free(t, d);
+        tlsf_check(t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 3: Verify forward expansion is still preferred over backward
+     * (no data movement needed for forward expansion)
+     */
+    {
+        const size_t size_a = 256;
+        const size_t size_b = 256;
+        const size_t size_c = 512;
+        const size_t size_d = 128; /* Keep D to prevent arena_shrink on C */
+
+        void *a = tlsf_malloc(t, size_a);
+        void *b = tlsf_malloc(t, size_b);
+        void *c = tlsf_malloc(t, size_c);
+        void *d = tlsf_malloc(t, size_d);
+        assert(a && b && c && d);
+
+        memset(b, 0xEF, size_b);
+
+        /* Free both A and C (D keeps C from being shrunk away) */
+        tlsf_free(t, a);
+        tlsf_free(t, c);
+        tlsf_check(t);
+
+        /* Request size that fits in current + next (forward) */
+        size_t new_size = size_b + size_c - 64;
+        void *new_b = tlsf_realloc(t, b, new_size);
+        assert(new_b);
+        tlsf_check(t);
+
+        /* Verify data integrity */
+        uint8_t *data = (uint8_t *) new_b;
+        for (size_t i = 0; i < size_b; i++)
+            assert(data[i] == 0xEF);
+
+        /* Forward expansion: pointer should remain at B's location */
+        assert(new_b == b);
+
+        tlsf_free(t, new_b);
+        tlsf_free(t, d);
+        tlsf_check(t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 4: Shrink then grow with backward expansion */
+    {
+        const size_t size_a = 1024, size_b = 512;
+
+        void *a = tlsf_malloc(t, size_a);
+        void *b = tlsf_malloc(t, size_b);
+        assert(a && b);
+
+        memset(b, 0x77, size_b);
+        tlsf_free(t, a);
+        tlsf_check(t);
+
+        /* First shrink B */
+        void *shrunk = tlsf_realloc(t, b, 128);
+        assert(shrunk == b); /* Shrink in place */
+
+        /* Verify data in shrunk size */
+        uint8_t *data = (uint8_t *) shrunk;
+        for (size_t i = 0; i < 128; i++)
+            assert(data[i] == 0x77);
+
+        /* Now grow it backward */
+        void *grown = tlsf_realloc(t, shrunk, size_a + 128);
+        assert(grown);
+        assert(grown == a); /* Should expand backward */
+        tlsf_check(t);
+
+        /* Verify data preserved */
+        data = (uint8_t *) grown;
+        for (size_t i = 0; i < 128; i++)
+            assert(data[i] == 0x77);
+
+        tlsf_free(t, grown);
+        tlsf_check(t);
+    }
+    printf(". done\n");
+}
+
 int main(void)
 {
     PAGE = (size_t) sysconf(_SC_PAGESIZE);
-    /*
-     * Virtual address space reservation for testing.
+    /* Virtual address space reservation for testing.
      * 64-bit: 1GB is sufficient and safe
      * 32-bit: 128MB to avoid VA space exhaustion (user space is 2-3GB)
      */
@@ -319,6 +497,9 @@ int main(void)
 
     /* Run pool append test */
     append_pool_test(&t);
+
+    /* Run backward expansion test */
+    realloc_backward_test(&t);
 
     /* Run fragmentation validation test */
     fragmentation_test(&t);

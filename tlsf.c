@@ -695,12 +695,65 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
 
     ASSERT(!block_is_free(block), "block already marked as free");
 
-    /* Do we need to expand to the next block? */
+    /* Do we need to expand? */
     if (size > avail) {
-        /* If the next block is used or too small, we must relocate and copy. */
         tlsf_block_t *next = block_next(block);
-        if (!block_is_free(next) ||
-            size > avail + block_size(next) + BLOCK_OVERHEAD) {
+        bool next_free = block_is_free(next);
+        size_t next_size = next_free ? block_size(next) + BLOCK_OVERHEAD : 0;
+
+        /* Try forward expansion first (no data movement required). */
+        if (next_free && size <= avail + next_size) {
+            block_merge_next(t, block);
+            block_set_prev_free(block_next(block), false);
+        }
+        /* Try backward expansion (requires memmove). */
+        else if (block_is_prev_free(block)) {
+            tlsf_block_t *prev = block_prev(block);
+            size_t prev_size = block_size(prev);
+            size_t combined = prev_size + avail + BLOCK_OVERHEAD;
+
+            /* Can also merge with next if it's free. */
+            if (next_free)
+                combined += next_size;
+
+            if (size <= combined) {
+                /* Remove prev from free list. */
+                block_remove(t, prev);
+
+                /* Move data to prev's payload area (regions may overlap). */
+                memmove(block_payload(prev), mem, avail);
+
+                /* Merge prev + current: update size, preserve prev's prev_free
+                 * bit. Result is a used block (not free).
+                 */
+                size_t new_size = prev_size + avail + BLOCK_OVERHEAD;
+                prev->header = new_size | (prev->header & BLOCK_BIT_PREV_FREE);
+                block_link_next(prev);
+
+                /* Also merge next if it's free. */
+                if (next_free) {
+                    block_remove(t, next);
+                    prev->header += block_size(next) + BLOCK_OVERHEAD;
+                    block_link_next(prev);
+                }
+
+                /* Update next block's prev_free status (we're now used). */
+                block_set_prev_free(block_next(prev), false);
+
+                /* Switch to the merged block. */
+                block = prev;
+                mem = block_payload(block);
+            } else {
+                /* Combined space still insufficient, must relocate. */
+                void *dst = tlsf_malloc(t, size);
+                if (dst) {
+                    memcpy(dst, mem, avail);
+                    tlsf_free(t, mem);
+                }
+                return dst;
+            }
+        } else {
+            /* No in-place expansion possible, must relocate. */
             void *dst = tlsf_malloc(t, size);
             if (dst) {
                 memcpy(dst, mem, avail);
@@ -708,12 +761,9 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
             }
             return dst;
         }
-
-        block_merge_next(t, block);
-        block_set_prev_free(block_next(block), false);
     }
 
-    /* Trim the resulting block and return the original pointer. */
+    /* Trim the resulting block and return the pointer. */
     block_rtrim_used(t, block, size);
     return mem;
 }
