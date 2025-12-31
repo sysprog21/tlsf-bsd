@@ -216,9 +216,14 @@ INLINE void block_set_free(tlsf_block_t *block, bool free)
 }
 
 /* Adjust allocation size to be aligned, and no smaller than internal minimum.
+ * Check bounds BEFORE alignment to prevent integer overflow.
+ * align_up() computes (((x-1) | (align-1)) + 1), which wraps to 0 when
+ * x is near SIZE_MAX, bypassing subsequent TLSF_MAX_SIZE checks.
  */
 INLINE size_t adjust_size(size_t size, size_t align)
 {
+    if (UNLIKELY(size > TLSF_MAX_SIZE))
+        return size; /* Preserve huge value to fail caller's bounds check */
     size = align_up(size, align);
     return size < BLOCK_SIZE_MIN ? BLOCK_SIZE_MIN : size;
 }
