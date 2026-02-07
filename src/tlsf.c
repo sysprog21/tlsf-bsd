@@ -244,26 +244,56 @@ INLINE size_t adjust_size(size_t size, size_t align)
     return size < BLOCK_SIZE_MIN ? BLOCK_SIZE_MIN : size;
 }
 
-/* Round up to the next block size */
+/* Round up to the next block size.
+ * Branch-free: for small sizes (< BLOCK_SIZE_SMALL), the rounding mask
+ * is zero, producing an identity.  For large sizes, it rounds up to
+ * the next second-level bin boundary.
+ */
 INLINE size_t round_block_size(size_t size)
 {
-    if (size < BLOCK_SIZE_SMALL)
-        return size;
-    size_t t = ((size_t) 1 << (log2floor(size) - SL_SHIFT)) - 1;
+    uint32_t lg = log2floor(size);
+    size_t is_large = (size_t) (lg >= (uint32_t) FL_SHIFT);
+    /* Clamp shift to valid range; garbage value is harmless when is_large=0
+     * because shifting zero by any valid amount yields zero.
+     */
+    uint32_t shift =
+        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (__SIZE_WIDTH__ - 1));
+    size_t round = is_large << shift;
+    /* Large: (1 << shift) - 1 = SL rounding mask.  Small: 0 - 0 = 0. */
+    size_t t = round - is_large;
     return (size + t) & ~t;
 }
 
+/* Map size to first-level (fl) and second-level (sl) bin indices.
+ * Branch-free: bitmask selection handles small sizes (linear binning
+ * in fl=0) and large sizes (logarithmic binning) without a conditional
+ * branch.  Beneficial on in-order cores (e.g., Cortex-M) where branch
+ * misprediction stalls the pipeline.
+ */
 INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
 {
-    if (size < BLOCK_SIZE_SMALL) {
-        /* Store small blocks in first list. */
-        *fl = 0;
-        *sl = (uint32_t) size / (BLOCK_SIZE_SMALL / SL_COUNT);
-    } else {
-        uint32_t t = log2floor(size);
-        *sl = (uint32_t) (size >> (t - SL_SHIFT)) ^ SL_COUNT;
-        *fl = t - FL_SHIFT + 1;
-    }
+    uint32_t t = log2floor(size);
+    /* All-ones mask when size is in the linear range (< BLOCK_SIZE_SMALL),
+     * all-zeros when in the logarithmic range.
+     */
+    uint32_t small = -(uint32_t) (t < (uint32_t) FL_SHIFT);
+
+    /* FL: 0 for small sizes, (t - FL_SHIFT + 1) for large sizes.
+     * The wrapping subtraction when t < FL_SHIFT is harmless because
+     * ~small masks it to zero.
+     */
+    *fl = ~small & (t - (uint32_t) FL_SHIFT + 1);
+
+    /* SL: linear index for small, logarithmic for large.
+     * Clamp the shift to avoid undefined behavior when t < SL_SHIFT;
+     * the garbage result is masked out by `small`.
+     */
+    uint32_t shift =
+        (t - (uint32_t) SL_SHIFT) & ((uint32_t) (__SIZE_WIDTH__ - 1));
+    uint32_t sl_large = (uint32_t) (size >> shift) ^ SL_COUNT;
+    uint32_t sl_small = (uint32_t) (size >> ALIGN_SHIFT);
+    *sl = (~small & sl_large) | (small & sl_small);
+
     ASSERT(*fl < FL_COUNT, "wrong first level");
     ASSERT(*sl < SL_COUNT, "wrong second level");
 }
