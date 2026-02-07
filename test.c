@@ -55,7 +55,7 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
      */
     int64_t rest = (int64_t) spacelen * (rand() % 6 + 1);
     unsigned i = 0;
-    while (rest > 0) {
+    while (rest > 0 && i < maxitems) {
         size_t len = ((size_t) rand() % cap) + 1;
         if (rand() % 2 == 0) {
             p[i] = tlsf_malloc(t, len);
@@ -87,8 +87,7 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
             memset(data, 0, len);
         data[0] = 0xa5;
 
-        if (i++ == maxitems)
-            break;
+        i++;
     }
 
     /* Randomly deallocate the memory blocks until all of them are freed.
@@ -476,6 +475,193 @@ static void realloc_backward_test(tlsf_t *t)
     printf(". done\n");
 }
 
+/* Test static (fixed-size) pool initialization and usage.
+ * Exercises tlsf_pool_init() without requiring tlsf_resize().
+ */
+static void static_pool_test(void)
+{
+    printf("Static pool test: ");
+    fflush(stdout);
+
+    /* Test 1: Basic init, alloc, free */
+    {
+        static char pool[1024 * 1024]; /* 1 MB */
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
+        assert(usable > 0);
+
+        void *p = tlsf_malloc(&t, 100);
+        assert(p);
+        assert((char *) p >= pool && (char *) p < pool + sizeof(pool));
+
+        tlsf_free(&t, p);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 2: Pool exhaustion returns NULL */
+    {
+        static char pool[4096];
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
+        assert(usable > 0);
+
+        void *ptrs[256];
+        int count = 0;
+        for (int i = 0; i < 256; i++) {
+            ptrs[i] = tlsf_malloc(&t, 64);
+            if (!ptrs[i])
+                break;
+            count++;
+        }
+        assert(count > 0);
+        assert(count < 256);
+
+        for (int i = 0; i < count; i++)
+            tlsf_free(&t, ptrs[i]);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 3: Multiple independent instances (no globals needed) */
+    {
+        static char pool_a[8192];
+        static char pool_b[8192];
+        tlsf_t ta, tb;
+        size_t ua = tlsf_pool_init(&ta, pool_a, sizeof(pool_a));
+        size_t ub = tlsf_pool_init(&tb, pool_b, sizeof(pool_b));
+        assert(ua > 0 && ub > 0);
+
+        void *pa = tlsf_malloc(&ta, 1000);
+        void *pb = tlsf_malloc(&tb, 2000);
+        assert(pa && pb);
+
+        assert((char *) pa >= pool_a && (char *) pa < pool_a + sizeof(pool_a));
+        assert((char *) pb >= pool_b && (char *) pb < pool_b + sizeof(pool_b));
+
+        tlsf_free(&tb, pb);
+        tlsf_free(&ta, pa);
+        tlsf_check(&ta);
+        tlsf_check(&tb);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 4: Realloc within static pool */
+    {
+        static char pool[32768];
+        tlsf_t t;
+        tlsf_pool_init(&t, pool, sizeof(pool));
+
+        void *p = tlsf_malloc(&t, 100);
+        assert(p);
+        memset(p, 0xAA, 100);
+
+        void *p2 = tlsf_realloc(&t, p, 500);
+        assert(p2);
+        uint8_t *data = (uint8_t *) p2;
+        for (int i = 0; i < 100; i++)
+            assert(data[i] == 0xAA);
+
+        void *p3 = tlsf_realloc(&t, p2, 50);
+        assert(p3);
+
+        tlsf_free(&t, p3);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 5: Aligned allocation within static pool */
+    {
+        static char pool[65536];
+        tlsf_t t;
+        tlsf_pool_init(&t, pool, sizeof(pool));
+
+        void *p = tlsf_aalloc(&t, 256, 256);
+        assert(p);
+        assert(((size_t) p % 256) == 0);
+
+        void *q = tlsf_aalloc(&t, 4096, 4096);
+        assert(q);
+        assert(((size_t) q % 4096) == 0);
+
+        tlsf_free(&t, p);
+        tlsf_free(&t, q);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 6: Pool too small */
+    {
+        char tiny[8];
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, tiny, sizeof(tiny));
+        assert(usable == 0);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 7: Stats on static pool */
+    {
+        static char pool[16384];
+        tlsf_t t;
+        tlsf_pool_init(&t, pool, sizeof(pool));
+
+        tlsf_stats_t stats;
+        int rc = tlsf_get_stats(&t, &stats);
+        assert(rc == 0);
+        assert(stats.total_free > 0);
+        assert(stats.free_count == 1);
+
+        void *p = tlsf_malloc(&t, 100);
+        assert(p);
+        rc = tlsf_get_stats(&t, &stats);
+        assert(rc == 0);
+        assert(stats.total_used > 0);
+
+        tlsf_free(&t, p);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 8: Append pool extends a static pool */
+    {
+        static char combined[8192];
+        tlsf_t t;
+
+        /* Initialize with first half */
+        size_t half = 4096;
+        size_t usable = tlsf_pool_init(&t, combined, half);
+        assert(usable > 0);
+
+        void *p1 = tlsf_malloc(&t, 1000);
+        assert(p1);
+
+        /* Append second half (adjacent by construction) */
+        size_t appended = tlsf_append_pool(&t, combined + half, half);
+        assert(appended > 0);
+
+        /* Allocate from the expanded pool */
+        void *p2 = tlsf_malloc(&t, 3000);
+        assert(p2);
+
+        /* Non-adjacent memory should fail */
+        char separate[512];
+        size_t bad = tlsf_append_pool(&t, separate, sizeof(separate));
+        assert(bad == 0);
+
+        tlsf_free(&t, p1);
+        tlsf_free(&t, p2);
+        tlsf_check(&t);
+    }
+    printf(". done\n");
+}
+
 int main(void)
 {
     PAGE = (size_t) sysconf(_SC_PAGESIZE);
@@ -503,6 +689,9 @@ int main(void)
 
     /* Run fragmentation validation test */
     fragmentation_test(&t);
+
+    /* Run static pool test */
+    static_pool_test();
 
     puts("OK!");
     return 0;
