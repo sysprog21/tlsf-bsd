@@ -50,6 +50,13 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     void **p = (void **) malloc(maxitems * sizeof(void *));
     assert(p);
 
+    /* Throttle tlsf_check() frequency to avoid O(n^2) overhead.
+     * Per-operation checking is fine for small pools (< 256 items).
+     * For large pools, check every N operations where N scales with pool
+     * size, bounding total check work to ~256 full heap walks per phase.
+     */
+    size_t check_stride = maxitems > 256 ? (maxitems + 255) / 256 : 1;
+
     /* Allocate random sizes up to the cap threshold.
      * Track them in an array.
      */
@@ -76,7 +83,8 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
             assert(p[i]);
         }
 
-        tlsf_check(t);
+        if (i % check_stride == 0)
+            tlsf_check(t);
 
         /* Fill with magic (only when testing up to 1MB). */
         uint8_t *data = (uint8_t *) p[i];
@@ -87,9 +95,13 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         i++;
     }
 
+    /* Final consistency check after all allocations. */
+    tlsf_check(t);
+
     /* Randomly deallocate the memory blocks until all of them are freed.
      * The free space should match the free space after initialisation.
      */
+    size_t freed = 0;
     for (unsigned n = i; n;) {
         size_t target = (size_t) rand() % i;
         if (p[target] == NULL)
@@ -101,8 +113,12 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         p[target] = NULL;
         n--;
 
-        tlsf_check(t);
+        if (++freed % check_stride == 0)
+            tlsf_check(t);
     }
+
+    /* Final consistency check after all deallocations. */
+    tlsf_check(t);
 
     free(p);
 }
@@ -768,7 +784,12 @@ int main(void)
     MAX_PAGES = ((size_t) 128 << 20) / PAGE; /* 128 MB */
 #endif
     tlsf_t t = TLSF_INIT;
-    srand((unsigned int) time(0));
+
+    const char *seed_env = getenv("TLSF_TEST_SEED");
+    unsigned int seed = seed_env ? (unsigned int) strtoul(seed_env, NULL, 0)
+                                 : (unsigned int) time(0);
+    printf("Random seed: %u (set TLSF_TEST_SEED to reproduce)\n", seed);
+    srand(seed);
 
     /* Run existing tests */
     large_size_test(&t);

@@ -27,6 +27,7 @@ jobs:
   build-and-test:
     needs: coding-style
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
