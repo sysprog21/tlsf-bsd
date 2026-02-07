@@ -247,8 +247,10 @@ INLINE size_t adjust_size(size_t size, size_t align)
 /* Round up to the next block size */
 INLINE size_t round_block_size(size_t size)
 {
+    if (size < BLOCK_SIZE_SMALL)
+        return size;
     size_t t = ((size_t) 1 << (log2floor(size) - SL_SHIFT)) - 1;
-    return size >= BLOCK_SIZE_SMALL ? (size + t) & ~t : size;
+    return (size + t) & ~t;
 }
 
 INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
