@@ -16,7 +16,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg
           echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y clang-format-20 shfmt
+          sudo apt-get install -y clang-format-20 shfmt black
         env:
           DEBIAN_FRONTEND: noninteractive
       - name: Check format
@@ -62,3 +62,75 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CFLAGS: ${{ matrix.cflags }}
+
+  wcet:
+    needs: [coding-style, build-and-test]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86-64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-matplotlib
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      - name: Build (release, no assert/check overhead)
+        run: make all CFLAGS="-Iinclude -std=gnu11 -O2 -Wall -Wextra -Wconversion"
+      - name: WCET measurement
+        run: ./build/wcet -i 5000 -w 500 -r build/wcet_raw.csv | tee build/wcet_output.txt
+      - name: Generate plots
+        run: python3 scripts/wcet_plot.py build/wcet_raw.csv -o build/wcet
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## WCET Results (${{ matrix.arch }})"
+            echo ""
+            echo '```'
+            cat build/wcet_output.txt 2>/dev/null || echo "WCET measurement failed or was skipped."
+            echo '```'
+            echo ""
+            echo "Box plot and histogram available in the **wcet-${{ matrix.arch }}** artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment on PR
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MARKER="<!-- wcet-${{ matrix.arch }} -->"
+          {
+            echo "$MARKER"
+            echo "## WCET Results (${{ matrix.arch }})"
+            echo ""
+            echo '```'
+            cat build/wcet_output.txt 2>/dev/null || echo "WCET measurement failed or was skipped."
+            echo '```'
+          } > /tmp/comment.md
+
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --paginate --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api "repos/${{ github.repository }}/issues/comments/$COMMENT_ID" \
+              -X PATCH -F body=@/tmp/comment.md
+          else
+            gh pr comment "${{ github.event.pull_request.number }}" -F /tmp/comment.md
+          fi
+      - name: Upload WCET artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wcet-${{ matrix.arch }}
+          path: |
+            build/wcet_raw.csv
+            build/wcet_boxplot.png
+            build/wcet_histogram.png
