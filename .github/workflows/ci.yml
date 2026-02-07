@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  coding-style:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install formatting tools
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-format-20 shfmt
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      - name: Check format
+        run: bash .ci/check-format.sh
+      - name: Check trailing newlines
+        run: bash .ci/check-newline.sh
+
+  build-and-test:
+    needs: coding-style
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: ""
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: "-fsanitize=undefined"
+          - runner: ubuntu-24.04
+            cc: clang
+            cflags: ""
+          - runner: ubuntu-24.04
+            cc: clang
+            cflags: "-fsanitize=undefined"
+          - runner: ubuntu-24.04-arm
+            cc: gcc
+            cflags: ""
+          - runner: ubuntu-24.04-arm
+            cc: clang
+            cflags: ""
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: make all
+        env:
+          CC: ${{ matrix.cc }}
+          CFLAGS: ${{ matrix.cflags }}
+      - name: Test
+        run: make check
+        env:
+          CC: ${{ matrix.cc }}
+          CFLAGS: ${{ matrix.cflags }}
