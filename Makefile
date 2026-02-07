@@ -19,6 +19,7 @@ bench-quick: all
 	build/bench -s 64:4096 -l 100000 -i 10 -w 3
 
 CFLAGS += \
+  -Iinclude \
   -std=gnu11 -g -O2 \
   -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual -Wconversion -Wc++-compat \
   -DTLSF_ENABLE_ASSERT -DTLSF_ENABLE_CHECK
@@ -27,13 +28,13 @@ OBJS = tlsf.o
 OBJS := $(addprefix $(OUT)/,$(OBJS))
 deps := $(OBJS:%.o=%.o.d)
 
-$(OUT)/test: $(OBJS) test.c
+$(OUT)/test: $(OBJS) tests/test.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(OUT)/bench: $(OBJS) bench.c
-	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $^ $(LDFLAGS)
+$(OUT)/bench: $(OBJS) tests/bench.c
+	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $^ $(LDFLAGS) -lm
 
-$(OUT)/%.o: %.c
+$(OUT)/%.o: src/%.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
 
