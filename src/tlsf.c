@@ -676,9 +676,8 @@ void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size)
     size_t adjust = adjust_size(size, ALIGN_SIZE);
 
     if (UNLIKELY(
-            !size ||
-            ((align | size) & (align - 1)) /* align!=2**x, size!=n*align */ ||
-            align > TLSF_MAX_SIZE || sizeof(tlsf_block_t) > TLSF_MAX_SIZE ||
+            !align || (align & (align - 1)) /* align must be power of two */
+            || align > TLSF_MAX_SIZE || sizeof(tlsf_block_t) > TLSF_MAX_SIZE ||
             adjust > TLSF_MAX_SIZE - align -
                          sizeof(tlsf_block_t) /* size is too large */))
         return NULL;

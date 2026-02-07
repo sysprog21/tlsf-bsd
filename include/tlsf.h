@@ -14,8 +14,9 @@ extern "C" {
 
 /*
  * Second-level subdivisions: 32 bins per first-level class.
- * This provides +6.25% average internal fragmentation (vs +12.5% with 16).
- * Control structure size increases ~2x for the block pointer array.
+ * Max internal fragmentation bounded by 1/SL_COUNT = 3.125% (was 6.25%
+ * with 16 bins). Control structure size increases ~2x for the block
+ * pointer array.
  */
 #define _TLSF_SL_COUNT 32
 #if __SIZE_WIDTH__ == 64
@@ -42,7 +43,21 @@ typedef struct {
  * users MUST override it, otherwise allocations will silently fail.
  */
 void *tlsf_resize(tlsf_t *, size_t);
-void *tlsf_aalloc(tlsf_t *, size_t, size_t);
+
+/**
+ * Allocate memory with a specified alignment.
+ *
+ * @param t     The TLSF allocator instance
+ * @param align Alignment in bytes; must be a non-zero power of two
+ * @param size  Requested allocation size in bytes; need not be a multiple of
+ *              @align (follows POSIX posix_memalign semantics; C11
+ *              aligned_alloc required size % align == 0 but C23 and
+ *              common implementations dropped that constraint)
+ * @return Pointer to at least @size bytes aligned to @align, or NULL on
+ *         failure.  A zero @size request returns a unique minimum-sized
+ *         allocation (consistent with tlsf_malloc).
+ */
+void *tlsf_aalloc(tlsf_t *, size_t align, size_t size);
 
 /**
  * Append a memory block to an existing pool, potentially coalescing with
@@ -74,8 +89,14 @@ size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
 size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes);
 
 /**
- * Allocates the requested @size bytes of memory and returns a pointer to it.
- * On failure, returns NULL.
+ * Allocate memory from the pool.
+ *
+ * @param t    The TLSF allocator instance
+ * @param size Requested allocation size in bytes.  A zero @size request
+ *             returns a unique minimum-sized allocation (POSIX-compatible
+ *             behavior), not NULL.
+ * @return Pointer to at least @size bytes, aligned to ALIGN_SIZE (8 on
+ *         64-bit, 4 on 32-bit), or NULL on failure.
  */
 void *tlsf_malloc(tlsf_t *, size_t size);
 void *tlsf_realloc(tlsf_t *, void *, size_t);

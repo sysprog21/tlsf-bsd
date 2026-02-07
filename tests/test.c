@@ -63,10 +63,7 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
             size_t align = 1U << (rand() % 20);
             if (cap < align)
                 align = 0;
-            else
-                len = align * (((size_t) rand() % (cap / align)) + 1);
-            p[i] = !align || !len ? tlsf_malloc(t, len)
-                                  : tlsf_aalloc(t, align, len);
+            p[i] = !align ? tlsf_malloc(t, len) : tlsf_aalloc(t, align, len);
             if (align)
                 assert(!((size_t) p[i] % align));
         }
@@ -662,6 +659,102 @@ static void static_pool_test(void)
     printf(". done\n");
 }
 
+/* Test zero-size and alignment edge cases.
+ * Validates consistent behavior between tlsf_malloc and tlsf_aalloc.
+ */
+static void zero_size_align_test(tlsf_t *t)
+{
+    printf("Zero-size and alignment semantics test: ");
+    fflush(stdout);
+
+    /* Test 1: tlsf_malloc(t, 0) returns a valid, unique pointer */
+    {
+        void *p = tlsf_malloc(t, 0);
+        assert(p);
+        void *q = tlsf_malloc(t, 0);
+        assert(q);
+        assert(p != q); /* Each zero-size alloc is unique */
+        tlsf_free(t, p);
+        tlsf_free(t, q);
+        tlsf_check(t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 2: tlsf_aalloc(t, align, 0) returns a valid aligned pointer
+     * (was returning NULL before the fix)
+     */
+    {
+        size_t aligns[] = {8, 16, 32, 64, 128, 256, 512, 1024, 4096};
+        for (size_t i = 0; i < sizeof(aligns) / sizeof(aligns[0]); i++) {
+            void *p = tlsf_aalloc(t, aligns[i], 0);
+            assert(p);
+            assert(((size_t) p % aligns[i]) == 0);
+            tlsf_free(t, p);
+        }
+        tlsf_check(t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 3: tlsf_aalloc no longer requires size to be a multiple of align
+     * (POSIX posix_memalign semantics: size need not be n*align)
+     */
+    {
+        /* size=100 is not a multiple of align=64 */
+        void *p = tlsf_aalloc(t, 64, 100);
+        assert(p);
+        assert(((size_t) p % 64) == 0);
+        memset(p, 0xAA, 100); /* Usable for at least 100 bytes */
+        tlsf_free(t, p);
+
+        /* size=7 is not a multiple of align=16 */
+        p = tlsf_aalloc(t, 16, 7);
+        assert(p);
+        assert(((size_t) p % 16) == 0);
+        tlsf_free(t, p);
+
+        /* size=1000 is not a multiple of align=256 */
+        p = tlsf_aalloc(t, 256, 1000);
+        assert(p);
+        assert(((size_t) p % 256) == 0);
+        memset(p, 0xBB, 1000);
+        tlsf_free(t, p);
+
+        tlsf_check(t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 4: Invalid alignment rejected (not power of two, zero) */
+    {
+        assert(tlsf_aalloc(t, 0, 100) == NULL);
+        assert(tlsf_aalloc(t, 3, 100) == NULL);
+        assert(tlsf_aalloc(t, 5, 100) == NULL);
+        assert(tlsf_aalloc(t, 6, 100) == NULL);
+        assert(tlsf_aalloc(t, 7, 100) == NULL);
+        assert(tlsf_aalloc(t, 9, 100) == NULL);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 5: Size that IS a multiple of align still works (regression) */
+    {
+        void *p = tlsf_aalloc(t, 64, 128);
+        assert(p);
+        assert(((size_t) p % 64) == 0);
+        tlsf_free(t, p);
+
+        p = tlsf_aalloc(t, 256, 512);
+        assert(p);
+        assert(((size_t) p % 256) == 0);
+        tlsf_free(t, p);
+
+        tlsf_check(t);
+    }
+    printf(". done\n");
+}
+
 int main(void)
 {
     PAGE = (size_t) sysconf(_SC_PAGESIZE);
@@ -689,6 +782,9 @@ int main(void)
 
     /* Run fragmentation validation test */
     fragmentation_test(&t);
+
+    /* Run zero-size and alignment semantics test */
+    zero_size_align_test(&t);
 
     /* Run static pool test */
     static_pool_test();
