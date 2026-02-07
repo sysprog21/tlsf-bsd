@@ -32,8 +32,15 @@ typedef struct {
     uint32_t fl, sl[_TLSF_FL_COUNT];
     struct tlsf_block *block[_TLSF_FL_COUNT][_TLSF_SL_COUNT];
     size_t size;
+    void *arena; /* Pool base address; non-NULL for fixed (static) pools */
 } tlsf_t;
 
+/**
+ * Callback to grow or query the memory arena (dynamic pools only).
+ * Users of tlsf_pool_init() need not provide this function.
+ * A weak default returning NULL is provided in tlsf.c; dynamic pool
+ * users MUST override it, otherwise allocations will silently fail.
+ */
 void *tlsf_resize(tlsf_t *, size_t);
 void *tlsf_aalloc(tlsf_t *, size_t, size_t);
 
@@ -48,6 +55,23 @@ void *tlsf_aalloc(tlsf_t *, size_t, size_t);
  * @return Number of bytes used from the memory block, 0 on failure
  */
 size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
+
+/**
+ * Initialize the allocator with a fixed-size memory pool.
+ * The pool will not auto-grow via tlsf_resize(); when the pool is
+ * exhausted, allocations return NULL.  Callers may still extend the
+ * pool explicitly via tlsf_append_pool() with adjacent memory.
+ * This avoids the need to implement tlsf_resize().
+ *
+ * Multiple independent instances are supported by initializing separate
+ * tlsf_t structures with their own memory regions.
+ *
+ * @param t     The TLSF allocator instance (will be zero-initialized)
+ * @param mem   Pointer to the memory region to use as the pool
+ * @param bytes Total size of the memory region in bytes
+ * @return      Usable bytes in the pool, or 0 on failure
+ */
+size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes);
 
 /**
  * Allocates the requested @size bytes of memory and returns a pointer to it.
