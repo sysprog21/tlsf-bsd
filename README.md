@@ -1,71 +1,274 @@
 # tlsf-bsd: Two-Level Segregated Fit Memory Allocator
 
-Two-Level Segregated Fit (TLSF) memory allocator implementation derived from the BSD-licensed implementation by [Matthew Conte](https://github.com/mattconte/tlsf).
-This code was based on the [TLSF documentation](http://www.gii.upv.es/tlsf/main/docs.html).
+An O(1) constant-time memory allocator for real-time and embedded systems,
+derived from the BSD-licensed implementation by
+[Matthew Conte](https://github.com/mattconte/tlsf) and based on the
+[TLSF specification](http://www.gii.upv.es/tlsf/main/docs.html).
 
-A novel technique called TLSF for dynamic memory allocation that maintains the effectiveness of the allocation and deallocation operations with a temporal cost of O(1).
-For long-running applications, the fragmentation issue also has a greater influence on system performance.
-The proposed method also produces a limited and tiny fragmentation.
+TLSF provides bounded worst-case allocation and deallocation with low fragmentation.
+The algorithm guarantees O(1) time complexity for all operations regardless of allocation pattern or heap state,
+a property required by hard real-time systems where unbounded latency is unacceptable.
 
 This implementation was written to the specification of the document,
 therefore no GPL restrictions apply.
 
 ## Features
+
 * O(1) cost for `malloc`, `free`, `realloc`, `aligned_alloc`
-* Low overhead per allocation (one word)
-* Low overhead for the TLSF metadata (~4kB)
-* Low fragmentation
-* Very small - only ~500 lines of code
-* Compiles to only a few kB of code and data
-* Uses a linear memory area, which is resized on demand
-* Not thread safe. API calls must be protected by a mutex in a multi-threaded environment.
-* Works in environments with only minimal libc, uses only `stddef.h`, `stdbool.h`, `stdint.h` and `string.h`.
+* One word overhead per allocation
+* 32 second-level subdivisions per first-level class
+  (~3.125% max internal fragmentation for large allocations)
+* Immediate coalescing on free (no deferred work)
+* Two pool modes: dynamic (auto-growing via `tlsf_resize`) and static
+  (fixed-size via `tlsf_pool_init`)
+* Pool extension via `tlsf_append_pool` (coalesces adjacent memory)
+* Realloc with in-place expansion (forward, backward, and combined)
+* Heap statistics and 4-phase consistency checking
+* WCET measurement infrastructure with cycle-accurate timing
+* Branch-free size-to-bin mapping
+* ~500 lines of core allocator code
+* Minimal libc: only `stddef.h`, `stdbool.h`, `stdint.h`, `string.h`
+* Not thread-safe by design; callers provide external synchronization
 
-## Design principals
-1. Immediate coalescing: As soon as a block is freed, the algorithm is designed to merge the freed block with adjacent free blocks ,if any, to build up larger free block.
-2. Splitting threshold: The smallest block of allocatable memory is 16 bytes. By this limit, it is possible to store the information needed to manage them, including the list of free blocks pointers.
-3. Good-fit strategy: TLSF uses a large set of free lists where each list is a non-ordered list of free blocks whose size is between the size class and the new size class. Each segregated list contains blocks of the same class.
-4. Same strategy for all block sizes: Some dynamic storage allocation (DSA) algorithms use different allocation strategies for different requested sizes. TLSF uses the same strategy for all sizes which provide uniform behavior, thus predictable WCET.
-5. Memory is not cleaned-up: In multi-user environments, DSA algorithms have to clean the memory by usually filling with zeros in order to avoid security problems. In TLSF, since we assume the algorithm will be used in a trusted environment, the algorithm does not clean up the memory when allocating which would bring considerable overhead.
+## Build and Test
 
-## How it works
+```shell
+make all          # Build test, bench, and wcet executables -> build/
+make check        # Run all tests with heap debugging
+make bench        # Full throughput benchmark (50 iterations)
+make bench-quick  # Quick benchmark for development
+make wcet         # WCET measurement (10000 iterations)
+make wcet-quick   # Quick WCET check
+make clean        # Remove build artifacts
+```
 
-This package offers constant, O(1)-time memory block allocation and deallocation, by means of segregated fit mechanism.
+Compile flags used by default:
+```
+-std=gnu11 -g -O2 -Wall -Wextra -DTLSF_ENABLE_ASSERT -DTLSF_ENABLE_CHECK
+```
 
-Two-level structure to speedup access and reduce fragmentation.
-* First level: Divides free blocks in classes of power of 2
-* Second level: Divides the size range indicated by the first level by 4. e.g., 2^6 first level covers the range of free list blocks of [2^6,2^7)
-  - This range is divided into 4 equidistant blocks.
+## API
+
+### Core Allocation
+
+```c
+#include "tlsf.h"
+
+/* Dynamic pool (auto-growing): user must define tlsf_resize() */
+tlsf_t t = TLSF_INIT;
+void *p = tlsf_malloc(&t, 256);
+void *q = tlsf_aalloc(&t, 64, 256);   /* 64-byte aligned */
+p = tlsf_realloc(&t, p, 512);
+tlsf_free(&t, p);
+tlsf_free(&t, q);
+
+/* Static pool (fixed-size): no tlsf_resize() needed */
+char pool[1 << 20];
+tlsf_t s;
+size_t usable = tlsf_pool_init(&s, pool, sizeof(pool));
+void *r = tlsf_malloc(&s, 100);
+tlsf_free(&s, r);
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `tlsf_malloc(t, size)` | Allocate `size` bytes. Zero `size` returns a unique minimum-sized block. |
+| `tlsf_free(t, ptr)` | Free a previously allocated block. NULL is a no-op. |
+| `tlsf_realloc(t, ptr, size)` | Resize allocation. Tries in-place expansion before relocating. |
+| `tlsf_aalloc(t, align, size)` | Allocate with alignment. `align` must be a power of two. |
+| `tlsf_pool_init(t, mem, bytes)` | Initialize a fixed-size pool. Returns usable bytes, 0 on failure. |
+| `tlsf_append_pool(t, mem, size)` | Extend pool with adjacent memory. Returns bytes used, 0 on failure. |
+| `tlsf_resize(t, size)` | Platform callback for dynamic pool growth (weak symbol). |
+| `tlsf_check(t)` | Validate heap consistency (requires `TLSF_ENABLE_CHECK`). |
+| `tlsf_get_stats(t, stats)` | Collect heap statistics (free/used bytes, block counts, overhead). |
+
+### Compile Flags
+
+| Flag | Effect |
+|------|--------|
+| `TLSF_ENABLE_ASSERT` | Enable runtime assertions in allocator internals |
+| `TLSF_ENABLE_CHECK` | Enable `tlsf_check()` heap consistency validation |
+
+## Design
+
+### Segregated Free Lists
+
+Traditional allocators maintain a single free list and search it on every allocation,
+resulting in O(n) cost in the number of free blocks.
+TLSF instead _segregates_ free blocks into size-classified bins.
+Each bin holds a linked list of blocks whose sizes fall within that bin's range.
+To allocate, TLSF looks up the bin for the requested size and pops a block from it.
+No searching, no traversal: the bin lookup _is_ the allocation.
+
+The key question is how to organize the bins so that (a) lookup is O(1),
+(b) internal fragmentation stays low, and (c) the control structure fits in a few kilobytes.
+
+### Two-Level Indexing
+
+A single level of power-of-2 bins would give O(1) lookup but up to 50% internal fragmentation
+(a 65-byte request lands in the 128-byte bin).
+Hundreds of linear bins would reduce fragmentation but make the bitmap too large for O(1) scanning.
+
+TLSF splits the difference with two levels:
+* First level (FL): power-of-2 size classes.
+  FL index `i` covers sizes `[2^i, 2^(i+1))`.
+  This gives logarithmic coverage: 32 classes span all sizes on 64-bit systems.
+* Second level (SL): each FL class is subdivided into 32 equal linear bins.
+  Within the range `[2^i, 2^(i+1))`, each SL bin covers a span of `2^i / 32`.
+
+The result: 32 x 32 = 1024 bins total, with worst-case internal fragmentation bounded by 1/32 = 3.125% for large allocations.
+Small sizes (below 256 bytes on 64-bit) use a flat linear mapping where every aligned size gets its own SL bin,
+so fragmentation for small allocations is zero.
+
+### Bitmap-Driven O(1) Lookup
+
+Each level is tracked by a bitmap: a single `uint32_t` for FL,
+and one `uint32_t` per FL class for SL.
+A set bit means "at least one free block exists in this bin."
+
+To find a suitable block:
+1. Map the requested size to FL/SL indices (arithmetic, no branches).
+2. Mask the SL bitmap at that FL index to find the first bin at or above the target SL using one `ffs` (find-first-set) instruction.
+3. If no SL bit is set, mask the FL bitmap to find the next larger FL class using another `ffs`.
+4. Read the head of the free list at `block[fl][sl]`.
+
+The entire search is two bitmap scans and an array dereference.
+`ffs` compiles to a single hardware instruction on all modern architectures
+(`bsf`/`tzcnt` on x86, `clz` on ARM), making the lookup genuinely O(1):
+not amortized, not expected-case, but worst-case constant time.
 
 ![TLSF Data Structure for Free Blocks](assets/data-structure.png)
 
-The structure consists of an array indexed by `log(2, requested_size)`.
-In other words, requests are divided up according to the requsted size's most significant bit (MSB).
-A pointer to the second level of the structure is contained in each item of the array.
-At this level, the free blocks of each slab size are divided into x additional groups,
-where x is a configurable number.
-An array of size x that implements this partitioning is indexed by taking the value of the `log(2, x)` bits that follow the MSB.
-Each value denotes the start of a linked list of free blocks (or is `NULL`).
+### Block Layout
 
-Finding a free block in the correctly sized class (or, if none are available, in a larger size class) in constant time requires using the bitmaps representing the availability of free blocks (of a certain size class).
+Each block in the pool has a minimal header:
 
-When `tlsf_free()` is called, the block examines if it may coalesce with nearby free blocks before returning to the free list.
+```
+ ┌─────────────────────────────────────────────────┐
+ │ prev (pointer to previous block, if it is free) │  ← boundary tag
+ ├─────────────────────────────────────────────────┤
+ │ header: size | free_bit | prev_free_bit         │  ← 1 word overhead
+ ├─────────────────────────────────────────────────┤
+ │ next_free (only when block is free)             │
+ │ prev_free (only when block is free)             │
+ ├─────────────────────────────────────────────────┤
+ │ ... payload ...                                 │
+ └─────────────────────────────────────────────────┘
+```
 
-### Finding a free block in TLSF `malloc()`
+The `header` field stores the block size with two status bits packed into the least significant bits.
+This works because all sizes are aligned to `ALIGN_SIZE` (8 bytes on 64-bit),
+so the low bits are always zero, providing free storage for metadata.
+Bit 0 indicates whether this block is free; bit 1 indicates whether the physically previous block is free.
 
-TLSF searches for a free block for a request in the order:
-1. First level index and second level index corresponding to the request is calculated. The indices are checked if a free block is available. If a free block is available at the indices, the block is returned.
-2. If a free block is not available at the indices, remaining second level indices are searched to find a free block. If a free block is available, it is returned.
-3. If not found, the next first level index whose value is 1 in the bitmap is searched to find a free block which guarantees to find a free block.
+The `prev` pointer is a _boundary tag_:
+it is stored at the end of the previous block (overlapping with this block's struct layout),
+and is only valid when the previous block is free.
+This enables O(1) backward coalescing without walking the block chain.
 
-#### Worst case happens when
-1. The first level index calculated for the requested size is 1 and second level indices are examined which results in a fail to find a free block = or > the requested size.
-2. The next free block available is on the right-most free-blocks list of the second level of the left-most first level index. When a small block is requested with size x, x bytes will be extracted from this huge block and returned. The remaining huge block going to the lower first level index results in the most overhead for this allocation operation.
+The `next_free`/`prev_free` pointers exist only in free blocks,
+forming the doubly-linked free list within each bin.
+When a block is allocated, these fields become part of the user payload,
+so no space is wasted.
+The net overhead per allocation is exactly one word (`header`).
 
-### Freeing a block in TLSF `free()`
-1. When a block is freed, the first thing done is to check if the physical neighbour blocks are free or not.
-2. If either of the neighbours are free, it is merged with the newly freed block. After the merge, new big block is inserted in the appropriate segregated list. (Mapping function is used to find first level and second level indices of the block)
-3. If neither of the neighbours are free, only the freed block is put on to the appropriate place in the segregated list.
+### Allocation
+
+1. Round the requested size up to the next SL bin boundary
+   (`round_block_size`), ensuring the block found will be at least as
+   large as requested.
+2. Map the rounded size to FL/SL indices (`mapping`) using bit
+   manipulation. This is branch-free on this implementation,
+   beneficial on in-order cores like Arm Cortex-M where branch misprediction stalls the pipeline.
+3. Search the SL bitmap at that FL index for a set bit (`ffs`).
+   If none, search the FL bitmap for the next larger class.
+4. Pop the head block from the free list at `block[fl][sl]`.
+5. If the block is larger than needed by at least `BLOCK_SIZE_MIN`,
+   split it: the front becomes the allocation,
+   the remainder is inserted back into the appropriate bin.
+
+Worst case: small request from a pool with one huge free block.
+Full bitmap scan + split + remainder insertion, yet still O(1).
+
+### Deallocation
+
+1. Mark the block as free (set bit 0 in `header`).
+2. Check bit 1 (`prev_free`): if set, merge with the previous block by
+   following the `prev` boundary tag for O(1) backward coalescing.
+3. Check the next block's free bit: if set, merge forward.
+4. Insert the (possibly merged) block into the appropriate free list and update the FL/SL bitmaps.
+
+Coalescing is _immediate_: every free produces the largest possible contiguous block.
+There is no deferred coalescing pass, no periodic compaction, and no garbage collection.
+This eliminates latency spikes from batch reclamation, a critical property for hard real-time systems.
+
+Worst case: block sandwiched between two free neighbors.
+Two merges + two list removals + one insertion, yet still O(1).
+
+### Sentinel Blocks
+
+Each pool ends with a zero-size _sentinel_ block.
+The sentinel terminates the physical block chain: `block_next()` never walks past it,
+and `block_size() == 0` signals "last block." Sentinels are never inserted into the free list.
+
+When `tlsf_append_pool` extends a pool with adjacent memory,
+the old sentinel is repurposed into a regular free block and merged with its neighbors.
+A new sentinel is placed at the end of the appended region.
+This allows pools to grow without leaving dead gaps at boundaries.
+
+### Reallocation
+
+Four-phase strategy to minimize data movement:
+
+1. Forward expansion: if the next physical block is free and large enough,
+   absorb it with zero copy since the payload does not move.
+2. Backward expansion: if the previous block is free and the combined size suffices,
+   absorb it and `memmove` the payload backward.
+3. Combined: merge prev + current + next when neither alone is enough but together they satisfy the request.
+4. Fallback: `malloc` a new block, `memcpy`, `free` the old one.
+
+Phases 1-3 avoid heap fragmentation by reusing adjacent space.
+Phase 2 uses `memmove` (not `memcpy`) because source and destination overlap.
+
+### Pool Modes
+
+Dynamic pools grow on demand via a user-provided `tlsf_resize()`
+callback.
+Static pools (`tlsf_pool_init`) use a fixed memory region and never call `tlsf_resize`.
+Both can be extended with `tlsf_append_pool` if adjacent memory is available.
+
+The `tlsf_resize` function is declared as a weak symbol: static pool users need not define it at all.
+Dynamic pool users must provide a strong definition
+(typically backed by `mmap` or a platform-specific memory source);
+without one, allocations silently return NULL.
+
+Multiple independent allocator instances are supported by initializing separate `tlsf_t` structures with their own memory regions.
+
+### Constants
+
+| Constant | 64-bit | 32-bit |
+|----------|--------|--------|
+| `TLSF_MAX_SIZE` | ~274 GB | ~2 GB |
+| Alignment | 8 bytes | 4 bytes |
+| Min block | 16 bytes | 12 bytes |
+| Block overhead | 8 bytes | 4 bytes |
+| SL subdivisions | 32 | 32 |
+
+## WCET Measurement
+
+The `tests/wcet.c` tool measures per-operation latency under pathological scenarios to bound TLSF's O(1) constant:
+
+```shell
+build/wcet -i 10000 -w 1000          # Standard measurement
+build/wcet -i 10000 -C               # Cold-cache mode
+build/wcet -i 10000 -c               # CSV output
+build/wcet -i 10000 -r samples.csv   # Raw samples for plotting
+```
+
+Timing uses `rdtsc` (x86-64), `cntvct_el0` (ARM64), or `mach_absolute_time` (macOS).
+Reports min, p50, p90, p99, p99.9, max, mean, and stddev.
 
 ## Reference
 
@@ -75,11 +278,10 @@ In Proc. ECRTS (2004), IEEE Computer Society, pp. 79-86.
 
 ## Related Projects
 
-* [tlsf-pmr](https://github.com/LiemDQ/tlsf-pmr): a memory resource for use with `polymorphic_allocator` that uses the Two-Level Segregated Fit algorithm as an allocation scheme.
-
+* [tlsf-pmr](https://github.com/LiemDQ/tlsf-pmr): C++17 PMR allocator using TLSF
 
 ## Licensing
 
 TLSF-BSD is freely redistributable under the 3-clause BSD License.
 Use of this source code is governed by a BSD-style license that can be found
-in the `LICENSE` file.
+in the [LICENSE](LICENSE) file.

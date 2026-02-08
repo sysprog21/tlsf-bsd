@@ -1,8 +1,7 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
- * Copyright (c) 2006-2016, Matthew Conte
- * Copyright (c) 2017-2020, Daniel Mendler
- * All rights reserved.
- * Use of this source code is governed by a BSD-style license.
+ * tlsf-bsd is freely redistributable under the BSD License. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 #include <stdbool.h>

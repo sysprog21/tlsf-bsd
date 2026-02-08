@@ -2,6 +2,11 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+/*
+ * tlsf-bsd is freely redistributable under the BSD License. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
+ */
+
 #pragma once
 
 /* Inhibit C++ name-mangling for tlsf functions */

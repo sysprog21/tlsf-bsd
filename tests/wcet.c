@@ -1,8 +1,10 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
- * Copyright (c) 2016 National Cheng Kung University, Taiwan.
- * All rights reserved.
- * Use of this source code is governed by a BSD-style license.
- *
+ * tlsf-bsd is freely redistributable under the BSD License. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
+ */
+
+/*
  * WCET (Worst-Case Execution Time) measurement for TLSF allocator.
  *
  * Measures per-operation latency under pathological scenarios to bound
