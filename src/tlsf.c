@@ -684,6 +684,27 @@ void *tlsf_malloc(tlsf_t *t, size_t size)
     size = adjust_size(size, ALIGN_SIZE);
     if (UNLIKELY(size > TLSF_MAX_SIZE))
         return NULL;
+
+    /* Fast path: small sizes (FL=0) use linear SL mapping directly.
+     * FL=0 bins are spaced at ALIGN_SIZE granularity, so we can skip
+     * log2floor, round_block_size, and mapping entirely.
+     */
+    if (size < BLOCK_SIZE_SMALL) {
+        uint32_t sl = (uint32_t) (size >> ALIGN_SHIFT);
+        uint32_t sl_map = t->sl[0] & (~0U << sl);
+        if (sl_map) {
+            uint32_t found_sl = bitmap_ffs(sl_map);
+            /* Use the bin's minimum size so mapping(block_size) returns
+             * the same bin on free.
+             */
+            size = (size_t) found_sl << ALIGN_SHIFT;
+            tlsf_block_t *block = t->block[0][found_sl];
+            remove_free_block(t, block, 0, found_sl);
+            return block_use(t, block, size);
+        }
+        /* Fall through: search larger FL classes via generic path */
+    }
+
     tlsf_block_t *block = block_find_free(t, &size);
     if (UNLIKELY(!block))
         return NULL;
