@@ -901,87 +901,13 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     })
 
 /**
- * Check for duplicate blocks in free lists (double-free detection).
- * Uses hash-set approach for O(n) complexity.
- *
- * Note: Uses stack allocation for reentrancy safety across multiple instances.
- * Table size of 2048 supports heaps with up to ~1400 free blocks (70% load).
- * For heaps exceeding this, the check is silently skipped.
- *
- * For embedded systems with limited stack, define TLSF_CHECK_TABLE_SIZE
- * to a smaller power-of-2 value (e.g., 256 for 2KB stack usage on 64-bit).
- */
-#ifndef TLSF_CHECK_TABLE_SIZE
-#define TLSF_CHECK_TABLE_SIZE 2048
-#endif
-#define DUP_CHECK_TABLE_SIZE TLSF_CHECK_TABLE_SIZE
-#define DUP_CHECK_MAX_LOAD ((DUP_CHECK_TABLE_SIZE * 70) / 100)
-static void check_no_duplicates(tlsf_t *t, size_t free_count)
-{
-    /* Skip check if too many free blocks - would exceed hash table capacity */
-    if (free_count > DUP_CHECK_MAX_LOAD)
-        return;
-
-    /* Stack allocation for reentrancy - 16KB on 64-bit systems */
-    tlsf_block_t *seen[DUP_CHECK_TABLE_SIZE];
-
-    /* Clear the table */
-    memset(seen, 0, sizeof(seen));
-
-    for (uint32_t i = 0; i < FL_COUNT; ++i) {
-        for (uint32_t j = 0; j < SL_COUNT; ++j) {
-            tlsf_block_t *block = t->block[i][j];
-            while (block) {
-                /* Hash the pointer using golden ratio for better distribution
-                 */
-                size_t hash = (((size_t) block >> 4) * 2654435769UL) %
-                              DUP_CHECK_TABLE_SIZE;
-                size_t orig_hash = hash;
-
-                /* Linear probe to find empty slot or duplicate */
-                while (seen[hash]) {
-                    CHECK(seen[hash] != block,
-                          "duplicate block in free list (double-free?)");
-                    hash = (hash + 1) % DUP_CHECK_TABLE_SIZE;
-                    CHECK(hash != orig_hash, "hash table unexpectedly full");
-                }
-
-                seen[hash] = block;
-                block = block->next_free;
-            }
-        }
-    }
-}
-#undef DUP_CHECK_MAX_LOAD
-#undef DUP_CHECK_TABLE_SIZE
-/* Note: TLSF_CHECK_TABLE_SIZE is user-configurable, not undef'd */
-
-/**
- * Check if a block is in the free list at the expected FL/SL bin.
- */
-static bool block_in_free_list(tlsf_t *t, tlsf_block_t *target)
-{
-    uint32_t fl, sl;
-    mapping(block_size(target), &fl, &sl);
-
-    tlsf_block_t *block = t->block[fl][sl];
-    while (block) {
-        if (block == target)
-            return true;
-        block = block->next_free;
-    }
-    return false;
-}
-
-/**
  * Comprehensive heap consistency check.
  *
  * Validates ALL block invariants by walking the entire heap:
  * 1. Block walk validation (all blocks from pool start to sentinel)
- * 2. Free list validation (bitmap consistency, coalescing)
+ * 2. Free list validation (bitmap consistency, coalescing, cycle/duplicate
+ *    detection via Floyd's algorithm -- O(1) stack usage)
  * 3. Cross-validation (free list count matches block walk count)
- * 4. Prev pointer validation (linkage consistency)
- * 5. Size/alignment invariants
  */
 void tlsf_check(tlsf_t *t)
 {
@@ -1036,15 +962,11 @@ void tlsf_check(tlsf_t *t)
         if (block_is_free(block)) {
             walk_free_count++;
 
-            /* Free block must be in free list */
-            CHECK(block_in_free_list(t, block),
-                  "free block not found in free list");
-
             /* Coalescing invariant: no two consecutive free blocks */
             CHECK(!prev_was_free,
                   "consecutive free blocks (coalescing failed)");
 
-            /* Note: Free list linkage is validated in Phase 2 */
+            /* Free-list membership verified by Phase 2/3 count match */
             prev_was_free = true;
         } else {
             prev_was_free = false;
@@ -1103,8 +1025,20 @@ void tlsf_check(tlsf_t *t)
             /* SL bit is set, so block list must be non-empty */
             CHECK(list_block, "SL bit set but block list is empty");
 
-            /* Walk the free list for this bin */
+            /* Walk the free list for this bin.
+             * Floyd's cycle detection runs in parallel: a fast pointer
+             * advances two steps per iteration.  If a duplicate block
+             * creates a cycle, slow and fast will collide in O(n) steps.
+             * This replaces the former 16 KB hash-table approach with
+             * O(1) stack usage -- critical for embedded/RTOS targets.
+             *
+             * Cross-bin duplicates are already caught above: Phase 2
+             * validates that each block maps to its bin, so a block
+             * cannot appear in two different bins without failing the
+             * fl/sl check first.
+             */
             tlsf_block_t *list_prev = NULL;
+            tlsf_block_t *fast = list_block;
             while (list_block) {
                 list_free_count++;
 
@@ -1143,6 +1077,14 @@ void tlsf_check(tlsf_t *t)
 
                 list_prev = list_block;
                 list_block = list_block->next_free;
+
+                /* Floyd's tortoise-and-hare cycle detection */
+                if (fast)
+                    fast = fast->next_free;
+                if (fast)
+                    fast = fast->next_free;
+                CHECK(!list_block || list_block != fast,
+                      "cycle in free list (duplicate block / double-free?)");
             }
         }
     }
@@ -1152,11 +1094,6 @@ void tlsf_check(tlsf_t *t)
      */
     CHECK(walk_free_count == list_free_count,
           "free block count mismatch between block walk and free list walk");
-
-    /*
-     * Phase 4: Duplicate detection (double-free)
-     */
-    check_no_duplicates(t, list_free_count);
 }
 #endif
 
