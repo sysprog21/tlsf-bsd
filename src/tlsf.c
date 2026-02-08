@@ -620,25 +620,17 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     /* Set up the new free block header */
     new_free_block->header = new_free_size | BLOCK_BIT_FREE;
 
-    /* Set up proper linking for the new free block */
-    if (!last_block && old_size > 2 * BLOCK_OVERHEAD) {
-        /* There's a previous block, find it by scanning backwards */
-        char *scan_start = (char *) old_sentinel - BLOCK_OVERHEAD;
-        char *pool_start = (char *) current_pool_start;
-
-        /* Simple backward scan to find the previous block */
-        for (char *scan_ptr = scan_start; scan_ptr >= pool_start;
-             scan_ptr -= ALIGN_SIZE) {
-            tlsf_block_t *candidate = to_block(scan_ptr - BLOCK_OVERHEAD);
-            if ((char *) candidate >= pool_start &&
-                (char *) candidate + BLOCK_OVERHEAD + block_size(candidate) ==
-                    (char *) old_sentinel) {
-                new_free_block->prev = candidate;
-                block_set_prev_free(new_free_block, block_is_free(candidate));
-                break;
-            }
-        }
-    }
+    /* When !last_block, the previous block is allocated (otherwise
+     * block_is_prev_free(old_sentinel) would have been true and we would
+     * have taken the last_block path).  BLOCK_BIT_PREV_FREE is already
+     * clear from the header assignment above.
+     *
+     * Do NOT write new_free_block->prev: it physically overlaps with the
+     * previous allocated block's payload tail (by TLSF block layout, the
+     * next block's prev field sits in the last sizeof(void *) bytes of
+     * the current block's payload).  The prev field is only read through
+     * block_prev(), which asserts block_is_prev_free() first.
+     */
 
     /* Insert the new free block into the appropriate list */
     block_insert(t, new_free_block);
