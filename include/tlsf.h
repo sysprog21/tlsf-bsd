@@ -34,11 +34,28 @@ extern "C" {
 #define TLSF_MAX_SIZE (((size_t) 1 << (_TLSF_FL_MAX - 1)) - sizeof(size_t))
 #define TLSF_INIT ((tlsf_t) {.size = 0})
 
+/*
+ * Block header structure.
+ *
+ * prev:      Pointer to the previous physical block.  Only valid when the
+ *            previous block is free; physically stored at the tail of that
+ *            block's payload.
+ * header:    Size (upper bits) | status bits (lower 2 bits).
+ * next_free: Next block in the same free list (only valid when free).
+ * prev_free: Previous block in the same free list (only valid when free).
+ */
+struct tlsf_block {
+    struct tlsf_block *prev;
+    size_t header;
+    struct tlsf_block *next_free, *prev_free;
+};
+
 typedef struct {
     uint32_t fl, sl[_TLSF_FL_COUNT];
     struct tlsf_block *block[_TLSF_FL_COUNT][_TLSF_SL_COUNT];
     size_t size;
-    void *arena; /* Pool base address; non-NULL for fixed (static) pools */
+    void *arena; /* Pool base address; non-NULL for fixed pools */
+    struct tlsf_block block_null; /* Free-list sentinel (absorbs writes) */
 } tlsf_t;
 
 /**

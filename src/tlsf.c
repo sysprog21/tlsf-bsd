@@ -56,21 +56,7 @@
 #define INLINE static inline __attribute__((always_inline))
 #endif
 
-typedef struct tlsf_block {
-    /* Points to the previous block.
-     * This field is only valid if the previous block is free and is actually
-     * stored at the end of the previous block.
-     */
-    struct tlsf_block *prev;
-
-    /* Size and block bits */
-    size_t header;
-
-    /* Next and previous free blocks.
-     * These fields are only valid if the corresponding block is free.
-     */
-    struct tlsf_block *next_free, *prev_free;
-} tlsf_block_t;
+typedef struct tlsf_block tlsf_block_t;
 
 _Static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8,
                "size_t must be 32 or 64 bit");
@@ -335,7 +321,10 @@ INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
     return t->block[*fl][*sl];
 }
 
-/* Remove a free block from the free list. */
+/* Remove a free block from the free list.
+ * Unconditional writes: prev/next may be &t->block_null (sentinel),
+ * in which case the writes are harmless.
+ */
 INLINE void remove_free_block(tlsf_t *t,
                               tlsf_block_t *block,
                               uint32_t fl,
@@ -346,17 +335,15 @@ INLINE void remove_free_block(tlsf_t *t,
 
     tlsf_block_t *prev = block->prev_free;
     tlsf_block_t *next = block->next_free;
-    if (next)
-        next->prev_free = prev;
-    if (prev)
-        prev->next_free = next;
+    next->prev_free = prev;
+    prev->next_free = next;
 
     /* If this block is the head of the free list, set new head. */
     if (t->block[fl][sl] == block) {
         t->block[fl][sl] = next;
 
-        /* If the new head is null, clear the bitmap. */
-        if (!next) {
+        /* If the new head is the sentinel, the bin is empty. */
+        if (next == &t->block_null) {
             t->sl[fl] &= ~(1U << sl);
 
             /* If the second bitmap is now empty, clear the fl bitmap. */
@@ -366,7 +353,10 @@ INLINE void remove_free_block(tlsf_t *t,
     }
 }
 
-/* Insert a free block into the free block list and mark the bitmaps. */
+/* Insert a free block into the free block list and mark the bitmaps.
+ * Unconditional write: current may be &t->block_null (sentinel),
+ * in which case the write to current->prev_free is harmless.
+ */
 INLINE void insert_free_block(tlsf_t *t,
                               tlsf_block_t *block,
                               uint32_t fl,
@@ -375,9 +365,8 @@ INLINE void insert_free_block(tlsf_t *t,
     tlsf_block_t *current = t->block[fl][sl];
     ASSERT(block, "cannot insert a null entry into the free list");
     block->next_free = current;
-    block->prev_free = 0;
-    if (current)
-        current->prev_free = block;
+    block->prev_free = &t->block_null;
+    current->prev_free = block;
     t->block[fl][sl] = block;
     t->fl |= 1U << fl;
     t->sl[fl] |= 1U << sl;
@@ -507,6 +496,15 @@ static bool arena_grow(tlsf_t *t, size_t size)
     /* Static pools cannot grow. */
     if (t->arena)
         return false;
+
+    /* First use of a dynamic pool: point all empty-bin pointers at the
+     * sentinel so that insert/remove can write unconditionally.
+     */
+    if (!t->size) {
+        for (uint32_t i = 0; i < FL_COUNT; i++)
+            for (uint32_t j = 0; j < SL_COUNT; j++)
+                t->block[i][j] = &t->block_null;
+    }
 
     size_t req_size =
         (t->size ? t->size + BLOCK_OVERHEAD : 2 * BLOCK_OVERHEAD) + size;
@@ -841,8 +839,13 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (!t || !mem)
         return 0;
 
-    /* Zero-initialize the control structure */
+    /* Zero-initialize the control structure, then point every bin at the
+     * sentinel so that free-list insert/remove can write unconditionally.
+     */
     memset(t, 0, sizeof(*t));
+    for (uint32_t i = 0; i < FL_COUNT; i++)
+        for (uint32_t j = 0; j < SL_COUNT; j++)
+            t->block[i][j] = &t->block_null;
 
     /* Align pool start */
     char *start = align_ptr((char *) mem, ALIGN_SIZE);
@@ -991,12 +994,14 @@ void tlsf_check(tlsf_t *t)
         uint32_t fl_bit = t->fl & (1U << i);
         uint32_t sl_list = t->sl[i];
 
-        /* If FL bit is clear, all SL bits and block pointers must be null */
+        /* If FL bit is clear, all SL bits and block pointers must be
+         * the sentinel.
+         */
         if (!fl_bit) {
             CHECK(sl_list == 0, "SL bitmap non-zero but FL bit is clear");
             for (uint32_t j = 0; j < SL_COUNT; ++j) {
-                CHECK(t->block[i][j] == NULL,
-                      "block pointer non-null but FL bit is clear");
+                CHECK(t->block[i][j] == &t->block_null,
+                      "block pointer not sentinel but FL bit is clear");
             }
             continue;
         }
@@ -1009,13 +1014,14 @@ void tlsf_check(tlsf_t *t)
             tlsf_block_t *list_block = t->block[i][j];
 
             if (!sl_bit) {
-                CHECK(!list_block,
-                      "block pointer non-null but SL bit is clear");
+                CHECK(list_block == &t->block_null,
+                      "block pointer not sentinel but SL bit is clear");
                 continue;
             }
 
             /* SL bit is set, so block list must be non-empty */
-            CHECK(list_block, "SL bit set but block list is empty");
+            CHECK(list_block != &t->block_null,
+                  "SL bit set but block list is empty (sentinel)");
 
             /* Walk the free list for this bin.
              * Floyd's cycle detection runs in parallel: a fast pointer
@@ -1029,9 +1035,9 @@ void tlsf_check(tlsf_t *t)
              * cannot appear in two different bins without failing the
              * fl/sl check first.
              */
-            tlsf_block_t *list_prev = NULL;
+            tlsf_block_t *list_prev = &t->block_null;
             tlsf_block_t *fast = list_block;
-            while (list_block) {
+            while (list_block != &t->block_null) {
                 list_free_count++;
 
                 /* Block must be free */
@@ -1062,7 +1068,7 @@ void tlsf_check(tlsf_t *t)
                 /* Free list linkage */
                 CHECK(list_block->prev_free == list_prev,
                       "free list prev pointer incorrect");
-                if (list_prev) {
+                if (list_prev != &t->block_null) {
                     CHECK(list_prev->next_free == list_block,
                           "free list next pointer incorrect");
                 }
@@ -1071,11 +1077,11 @@ void tlsf_check(tlsf_t *t)
                 list_block = list_block->next_free;
 
                 /* Floyd's tortoise-and-hare cycle detection */
-                if (fast)
+                if (fast != &t->block_null)
                     fast = fast->next_free;
-                if (fast)
+                if (fast != &t->block_null)
                     fast = fast->next_free;
-                CHECK(!list_block || list_block != fast,
+                CHECK(list_block == &t->block_null || list_block != fast,
                       "cycle in free list (duplicate block / double-free?)");
             }
         }
