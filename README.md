@@ -26,9 +26,10 @@ therefore no GPL restrictions apply.
 * Heap statistics and 4-phase consistency checking
 * WCET measurement infrastructure with cycle-accurate timing
 * Branch-free size-to-bin mapping
+* Optional thread-safe wrapper (`tlsf_thread.h`)
+  with per-arena fine-grained locking and configurable lock primitives for RTOS portability
 * ~500 lines of core allocator code
 * Minimal libc: only `stddef.h`, `stdbool.h`, `stdint.h`, `string.h`
-* Not thread-safe by design; callers provide external synchronization
 
 ## Build and Test
 
@@ -81,8 +82,10 @@ tlsf_free(&s, r);
 | `tlsf_pool_init(t, mem, bytes)` | Initialize a fixed-size pool. Returns usable bytes, 0 on failure. |
 | `tlsf_append_pool(t, mem, size)` | Extend pool with adjacent memory. Returns bytes used, 0 on failure. |
 | `tlsf_resize(t, size)` | Platform callback for dynamic pool growth (weak symbol). |
+| `tlsf_usable_size(ptr)` | Return the usable size of an allocated block. |
 | `tlsf_check(t)` | Validate heap consistency (requires `TLSF_ENABLE_CHECK`). |
 | `tlsf_get_stats(t, stats)` | Collect heap statistics (free/used bytes, block counts, overhead). |
+| `tlsf_pool_reset(t)` | Reset a static pool to its initial empty state (bounded time). |
 
 ### Compile Flags
 
@@ -92,6 +95,47 @@ tlsf_free(&s, r);
 | `TLSF_ENABLE_CHECK` | Enable `tlsf_check()` heap consistency validation |
 | `TLSF_MAX_POOL_BITS` | Clamp FL index to reduce `tlsf_t` size. Pool max becomes `2^N` bytes. E.g. `-DTLSF_MAX_POOL_BITS=20` for 1 MB |
 | `TLSF_SPLIT_THRESHOLD` | Minimum remainder size (bytes) to split off when trimming. Default: `BLOCK_SIZE_MIN` (16 on 64-bit) |
+
+### Thread-Safe Wrapper
+
+For concurrent use, include the optional per-arena wrapper:
+
+```c
+#include "tlsf_thread.h"
+
+static char pool[4 * 1024 * 1024];
+tlsf_thread_t ts;
+
+size_t usable = tlsf_thread_init(&ts, pool, sizeof(pool));
+void *p = tlsf_thread_malloc(&ts, 256);
+void *q = tlsf_thread_aalloc(&ts, 64, 256);
+p = tlsf_thread_realloc(&ts, p, 512);
+tlsf_thread_free(&ts, p);
+tlsf_thread_free(&ts, q);
+tlsf_thread_destroy(&ts);
+```
+
+| Function | Description |
+|----------|-------------|
+| `tlsf_thread_init(ts, mem, bytes)` | Split memory into per-arena sub-pools. Returns total usable bytes. |
+| `tlsf_thread_destroy(ts)` | Release lock resources. Does not free the memory region. |
+| `tlsf_thread_malloc(ts, size)` | Thread-safe malloc with per-arena locking. |
+| `tlsf_thread_aalloc(ts, align, size)` | Thread-safe aligned allocation. |
+| `tlsf_thread_realloc(ts, ptr, size)` | Thread-safe realloc. In-place first, cross-arena fallback. |
+| `tlsf_thread_free(ts, ptr)` | Thread-safe free. Finds owning arena automatically. |
+| `tlsf_thread_check(ts)` | Heap consistency check across all arenas. |
+| `tlsf_thread_stats(ts, stats)` | Aggregate statistics across all arenas. |
+| `tlsf_thread_reset(ts)` | Reset all arenas to initial state (bounded time). |
+
+| Compile Flag | Effect |
+|-------------|--------|
+| `TLSF_ARENA_COUNT` | Number of independent arenas (default 4). Power of two recommended. |
+| `TLSF_LOCK_T` | Lock type. Override all six lock macros for RTOS portability. |
+| `TLSF_THREAD_HINT()` | Thread-specific hash input for arena selection. Default: `pthread_self()`. |
+
+The default lock primitive is `pthread_mutex_t`. To use a platform-specific
+lock (FreeRTOS semaphore, Zephyr k_mutex, bare-metal spinlock), define
+`TLSF_LOCK_T` and all associated macros before including `tlsf_thread.h`.
 
 ## Design
 
@@ -247,6 +291,29 @@ Dynamic pool users must provide a strong definition
 without one, allocations silently return NULL.
 
 Multiple independent allocator instances are supported by initializing separate `tlsf_t` structures with their own memory regions.
+
+### Thread Safety
+
+The core allocator (`tlsf.h`) is single-threaded by design.
+The optional wrapper (`tlsf_thread.h`) adds thread safety through per-arena fine-grained locking,
+following the same multi-arena pattern used by jemalloc and mimalloc.
+
+The pool is split into `TLSF_ARENA_COUNT` independent sub-pools, each with its own lock.
+Threads are mapped to arenas by a hash of their thread identifier,
+so concurrent allocations from different threads typically hit different locks with zero contention.
+
+Allocation follows a two-phase fallback:
+1. Fast path: lock the thread's preferred arena, allocate, unlock.
+2. Slow path (arena exhausted): try remaining arenas via non-blocking `trylock` first, then blocking `acquire`.
+
+Free identifies the owning arena via pointer-range lookup (O(N) where N is the arena count,
+effectively O(1) for small N) and locks only that arena.
+
+Realloc attempts in-place growth within the owning arena.
+When the arena lacks space, it falls back to cross-arena malloc + memcpy + free.
+
+Trade-offs: more arenas reduce contention but partition memory (one arena can exhaust while others have space).
+Fewer arenas improve memory utilization at the cost of higher contention.
 
 ### Constants
 

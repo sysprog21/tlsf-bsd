@@ -163,6 +163,18 @@ void *tlsf_realloc(tlsf_t *, void *, size_t);
  */
 void tlsf_free(tlsf_t *, void *);
 
+/**
+ * Return the usable size of an existing allocation.
+ * The usable size may exceed the originally requested size due to
+ * alignment rounding and bin-class quantization.
+ * Equivalent to POSIX malloc_usable_size().
+ *
+ * @param ptr Pointer previously returned by tlsf_malloc/aalloc/realloc.
+ *            Behavior is undefined if ptr has been freed.
+ * @return Usable payload bytes, or 0 if ptr is NULL
+ */
+size_t tlsf_usable_size(void *ptr);
+
 #ifdef TLSF_ENABLE_CHECK
 void tlsf_check(tlsf_t *);
 #else
