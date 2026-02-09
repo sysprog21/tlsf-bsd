@@ -6,7 +6,9 @@ TARGETS = \
 	wcet
 TARGETS := $(addprefix $(OUT)/,$(TARGETS))
 
-all: $(TARGETS)
+THREAD_TARGETS = $(OUT)/test_thread
+
+all: $(TARGETS) $(THREAD_TARGETS)
 
 # Full benchmark with statistical rigor (50 iterations, 5 warmup)
 bench: all
@@ -27,6 +29,9 @@ CFLAGS += \
 
 OBJS = tlsf.o
 OBJS := $(addprefix $(OUT)/,$(OBJS))
+
+THREAD_OBJS = $(OUT)/tlsf_thread.o
+
 deps := $(OBJS:%.o=%.o.d)
 
 $(OUT)/test: $(OBJS) tests/test.c
@@ -38,16 +43,25 @@ $(OUT)/bench: $(OBJS) tests/bench.c
 $(OUT)/wcet: $(OBJS) tests/wcet.c
 	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $^ $(LDFLAGS) -lm
 
+# Thread-safe module (requires pthreads)
+$(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -pthread -c -o $@ -MMD -MF $@.d $<
+
+$(OUT)/test_thread: $(OBJS) $(THREAD_OBJS) tests/test_thread.c
+	$(CC) $(CFLAGS) -pthread -o $@ -MMD -MF $@.d $^ $(LDFLAGS)
+
 $(OUT)/%.o: src/%.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
 
-check: $(TARGETS)
+check: $(TARGETS) $(THREAD_TARGETS)
 	MALLOC_CHECK_=3 ./build/test
 	MALLOC_CHECK_=3 ./build/bench -l 10000 -i 3 -w 1
 	MALLOC_CHECK_=3 ./build/bench -s 32 -l 10000 -i 3 -w 1
 	MALLOC_CHECK_=3 ./build/bench -s 10:12345 -l 10000 -i 3 -w 1
 	./build/wcet -i 100 -w 10
+	./build/test_thread
 
 # Full WCET measurement (10000 iterations, 1000 warmup)
 wcet: all
@@ -64,7 +78,7 @@ wcet-plot: all
 	python3 scripts/wcet_plot.py $(OUT)/wcet_raw.csv -o $(OUT)/wcet
 
 clean:
-	$(RM) $(TARGETS) $(OBJS) $(deps)
+	$(RM) $(TARGETS) $(THREAD_TARGETS) $(OBJS) $(THREAD_OBJS) $(deps)
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
 

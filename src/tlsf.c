@@ -871,6 +871,15 @@ void tlsf_free(tlsf_t *t, void *mem)
         block_insert(t, block);
 }
 
+size_t tlsf_usable_size(void *ptr)
+{
+    if (UNLIKELY(!ptr))
+        return 0;
+    tlsf_block_t *block = block_from_payload(ptr);
+    ASSERT(!block_is_free(block), "block must be allocated");
+    return block_size(block);
+}
+
 void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
 {
     /* Zero-size requests are treated as free. */
