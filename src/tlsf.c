@@ -61,6 +61,45 @@
 #endif
 #endif
 
+/*
+ * ASan shadow poisoning: teach AddressSanitizer about TLSF's internal
+ * pool layout so it can detect UAF and overflow within custom pools.
+ * Auto-detected; zero overhead when ASan is not active.
+ */
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#include <sanitizer/asan_interface.h>
+#define ASAN_POISON(addr, size) __asan_poison_memory_region((addr), (size))
+#define ASAN_UNPOISON(addr, size) __asan_unpoison_memory_region((addr), (size))
+#else
+#define ASAN_POISON(addr, size) ((void) (addr), (void) (size))
+#define ASAN_UNPOISON(addr, size) ((void) (addr), (void) (size))
+#endif
+
+/*
+ * Fill-pattern poisoning: memset payload with 0xAA on alloc and 0xFF
+ * on free to catch use-after-free and uninitialized reads on bare-metal
+ * targets where sanitizers are unavailable.
+ * Gated by -DTLSF_ENABLE_POISON; zero overhead when not defined.
+ */
+#ifdef TLSF_ENABLE_POISON
+#define POISON_FILL(addr, val, size) memset((addr), (val), (size))
+#else
+#define POISON_FILL(addr, val, size) \
+    ((void) (addr), (void) (val), (void) (size))
+#endif
+
+/*
+ * Metadata bytes embedded within a free block's payload:
+ *   - next_free + prev_free at the start (2 pointers)
+ *   - next block's prev at the end (1 pointer)
+ * Fill/poison must skip these regions to avoid corrupting TLSF
+ * metadata.  For minimum-size blocks the safe region is empty.
+ */
+#define BLOCK_PAYLOAD_OVERHEAD (sizeof(struct tlsf_block *) * 3)
+
 #ifndef INLINE
 #define INLINE static inline __attribute__((always_inline))
 #endif
@@ -191,6 +230,25 @@ INLINE tlsf_block_t *block_from_payload(void *ptr)
 {
     return to_block((char *) ptr - offsetof(tlsf_block_t, header) -
                     BLOCK_OVERHEAD);
+}
+
+/* Poison the safe region of a free block's payload.
+ *
+ * The safe region excludes live TLSF metadata embedded in the payload
+ * (free-list pointers at the start, next block's prev at the end).
+ * Must unpoison the full payload first: after block_absorb merges
+ * two blocks, the old safe region may carry stale ASan shadow.
+ */
+INLINE void block_poison_free(tlsf_block_t *block)
+{
+    size_t bsize = block_size(block);
+    ASAN_UNPOISON(block_payload(block), bsize);
+    if (bsize > BLOCK_PAYLOAD_OVERHEAD) {
+        char *safe = block_payload(block) + sizeof(tlsf_block_t *) * 2;
+        size_t safe_len = bsize - BLOCK_PAYLOAD_OVERHEAD;
+        POISON_FILL(safe, 0xFF, safe_len);
+        ASAN_POISON(safe, safe_len);
+    }
 }
 
 /* Return location of previous block. */
@@ -422,6 +480,9 @@ INLINE tlsf_block_t *block_split(tlsf_block_t *block, size_t size)
     ASSERT(!(rest_size % ALIGN_SIZE), "invalid block size");
     block_set_free(rest, true);
     block_set_size(block, size);
+
+    block_poison_free(rest);
+
     return rest;
 }
 
@@ -496,13 +557,18 @@ INLINE tlsf_block_t *block_ltrim_free(tlsf_t *t,
     block_set_prev_free(rest, true);
     block_link_next(block);
     block_insert(t, block);
+    block_poison_free(block);
     return rest;
 }
 
 INLINE void *block_use(tlsf_t *t, tlsf_block_t *block, size_t size)
 {
+    /* Unpoison before trimming -- block_split writes into the payload. */
+    ASAN_UNPOISON(block_payload(block), block_size(block));
     block_rtrim_free(t, block, size);
     block_set_free(block, false);
+    POISON_FILL(block_payload(block), 0xAA, block_size(block));
+
     return block_payload(block);
 }
 
@@ -542,6 +608,11 @@ static bool arena_grow(tlsf_t *t, size_t size)
     if (!addr)
         return false;
     ASSERT((size_t) addr % ALIGN_SIZE == 0, "wrong heap alignment address");
+
+    /* Clear stale ASan shadow in the growth region: prior arena_shrink
+     * cycles may have left poisoned shadow bytes that were never cleared.
+     */
+    ASAN_UNPOISON((char *) addr + t->size, req_size - t->size);
     tlsf_block_t *block =
         to_block(t->size ? (char *) addr + t->size - 2 * BLOCK_OVERHEAD
                          : (char *) addr - BLOCK_OVERHEAD);
@@ -555,6 +626,8 @@ static bool arena_grow(tlsf_t *t, size_t size)
     sentinel->header = BLOCK_BIT_PREV_FREE;
     t->size = req_size;
     check_sentinel(sentinel);
+
+    block_poison_free(block);
     return true;
 }
 
@@ -611,6 +684,11 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
         if (!resized)
             return 0;
         current_pool_start = resized;
+
+        /* Clear stale ASan shadow in the extension region. */
+        ASAN_UNPOISON((char *) resized + old_size, new_total_size - old_size);
+    } else {
+        ASAN_UNPOISON(mem, size);
     }
 
     /* Update our pool size */
@@ -672,6 +750,7 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     new_sentinel->header = BLOCK_BIT_PREV_FREE;
     check_sentinel(new_sentinel);
 
+    block_poison_free(new_free_block);
     return aligned_size;
 }
 
@@ -765,6 +844,8 @@ void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size)
     if (UNLIKELY(!block))
         return NULL;
 
+    ASAN_UNPOISON(block_payload(block), block_size(block));
+
     char *mem = align_ptr(block_payload(block) + sizeof(tlsf_block_t), align);
     block = block_ltrim_free(t, block, (size_t) (mem - block_payload(block)));
     return block_use(t, block, adjust);
@@ -781,6 +862,8 @@ void tlsf_free(tlsf_t *t, void *mem)
     block_set_free(block, true);
     block = block_merge_prev(t, block);
     block = block_merge_next(t, block);
+
+    block_poison_free(block);
 
     if (UNLIKELY(!block_size(block_next(block))) && !t->arena)
         arena_shrink(t, block);
@@ -817,6 +900,7 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
         /* Try forward expansion first (no data movement required). */
         if (next_free && size <= avail + next_size) {
             block_merge_next(t, block);
+            ASAN_UNPOISON(block_payload(block), block_size(block));
             block_set_prev_free(block_next(block), false);
         }
         /* Try backward expansion (requires memmove). */
@@ -833,6 +917,8 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
                 /* Remove prev from free list. */
                 block_remove(t, prev);
 
+                ASAN_UNPOISON(block_payload(prev), prev_size);
+
                 /* Move data to prev's payload area (regions may overlap). */
                 memmove(block_payload(prev), mem, avail);
 
@@ -846,6 +932,7 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
                 /* Also merge next if it's free. */
                 if (next_free) {
                     block_remove(t, next);
+                    ASAN_UNPOISON(block_payload(next), block_size(next));
                     prev->header += block_size(next) + BLOCK_OVERHEAD;
                     block_link_next(prev);
                 }
@@ -894,6 +981,9 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (!t || !mem)
         return 0;
 
+    /* Clear any stale ASan shadow in the provided memory. */
+    ASAN_UNPOISON(mem, bytes);
+
     /* Zero-initialize the control structure, then point every bin at the
      * sentinel so that free-list insert/remove can write unconditionally.
      */
@@ -935,6 +1025,8 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     sentinel->header = BLOCK_BIT_PREV_FREE;
 
     t->size = free_size + 2 * BLOCK_OVERHEAD;
+
+    block_poison_free(block);
 
     return free_size;
 }
