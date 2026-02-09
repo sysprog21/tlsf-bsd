@@ -24,13 +24,30 @@ extern "C" {
  * pointer array.
  */
 #define _TLSF_SL_COUNT 32
+
+/*
+ * Configurable maximum pool size: define TLSF_MAX_POOL_BITS to clamp
+ * the first-level index, reducing the tlsf_t control structure size.
+ * Pool cannot exceed 2^TLSF_MAX_POOL_BITS bytes.
+ * E.g. -DTLSF_MAX_POOL_BITS=20 for a 1MB-max pool.
+ */
+#ifdef TLSF_MAX_POOL_BITS
+#define _TLSF_FL_MAX TLSF_MAX_POOL_BITS
+#else
 #if __SIZE_WIDTH__ == 64
-#define _TLSF_FL_COUNT 32
 #define _TLSF_FL_MAX 39
 #else
-#define _TLSF_FL_COUNT 25
 #define _TLSF_FL_MAX 31
 #endif
+#endif
+
+/* FL_SHIFT = log2(SL_COUNT) + log2(ALIGN_SIZE) */
+#if __SIZE_WIDTH__ == 64
+#define _TLSF_FL_SHIFT 8
+#else
+#define _TLSF_FL_SHIFT 7
+#endif
+#define _TLSF_FL_COUNT (_TLSF_FL_MAX - _TLSF_FL_SHIFT + 1)
 #define TLSF_MAX_SIZE (((size_t) 1 << (_TLSF_FL_MAX - 1)) - sizeof(size_t))
 #define TLSF_INIT ((tlsf_t) {.size = 0})
 
@@ -52,9 +69,9 @@ struct tlsf_block {
 
 typedef struct {
     uint32_t fl, sl[_TLSF_FL_COUNT];
-    struct tlsf_block *block[_TLSF_FL_COUNT][_TLSF_SL_COUNT];
-    size_t size;
     void *arena; /* Pool base address; non-NULL for fixed pools */
+    size_t size;
+    struct tlsf_block *block[_TLSF_FL_COUNT][_TLSF_SL_COUNT];
     struct tlsf_block block_null; /* Free-list sentinel (absorbs writes) */
 } tlsf_t;
 
