@@ -90,6 +90,8 @@ tlsf_free(&s, r);
 |------|--------|
 | `TLSF_ENABLE_ASSERT` | Enable runtime assertions in allocator internals |
 | `TLSF_ENABLE_CHECK` | Enable `tlsf_check()` heap consistency validation |
+| `TLSF_MAX_POOL_BITS` | Clamp FL index to reduce `tlsf_t` size. Pool max becomes `2^N` bytes. E.g. `-DTLSF_MAX_POOL_BITS=20` for 1 MB |
+| `TLSF_SPLIT_THRESHOLD` | Minimum remainder size (bytes) to split off when trimming. Default: `BLOCK_SIZE_MIN` (16 on 64-bit) |
 
 ## Design
 
@@ -185,8 +187,8 @@ The net overhead per allocation is exactly one word (`header`).
 3. Search the SL bitmap at that FL index for a set bit (`ffs`).
    If none, search the FL bitmap for the next larger class.
 4. Pop the head block from the free list at `block[fl][sl]`.
-5. If the block is larger than needed by at least `BLOCK_SIZE_MIN`,
-   split it: the front becomes the allocation,
+5. If the block is larger than needed by at least `TLSF_SPLIT_THRESHOLD`
+   (default `BLOCK_SIZE_MIN`), split it: the front becomes the allocation,
    the remainder is inserted back into the appropriate bin.
 
 Worst case: small request from a pool with one huge free block.
@@ -248,13 +250,14 @@ Multiple independent allocator instances are supported by initializing separate 
 
 ### Constants
 
-| Constant | 64-bit | 32-bit |
-|----------|--------|--------|
-| `TLSF_MAX_SIZE` | ~274 GB | ~2 GB |
-| Alignment | 8 bytes | 4 bytes |
-| Min block | 16 bytes | 12 bytes |
-| Block overhead | 8 bytes | 4 bytes |
-| SL subdivisions | 32 | 32 |
+| Constant | 64-bit | 32-bit | Notes |
+|----------|--------|--------|-------|
+| `TLSF_MAX_SIZE` | ~274 GB | ~2 GB | Reduced by `TLSF_MAX_POOL_BITS` |
+| FL classes | 32 | 25 | `_TLSF_FL_MAX - _TLSF_FL_SHIFT + 1` |
+| Alignment | 8 bytes | 4 bytes | |
+| Min block | 16 bytes | 12 bytes | |
+| Block overhead | 8 bytes | 4 bytes | |
+| SL subdivisions | 32 | 32 | |
 
 ## WCET Measurement
 

@@ -43,6 +43,15 @@
 #define BLOCK_SIZE_MAX ((size_t) 1 << (FL_MAX - 1))
 #define BLOCK_SIZE_SMALL ((size_t) 1 << FL_SHIFT)
 
+/* Minimum remainder size for trimming. Raising this above BLOCK_SIZE_MIN
+ * avoids creating tiny free blocks that waste metadata overhead relative
+ * to their usable payload, trading internal fragmentation for fewer
+ * unusable fragments. Default: BLOCK_SIZE_MIN (current behavior).
+ */
+#ifndef TLSF_SPLIT_THRESHOLD
+#define TLSF_SPLIT_THRESHOLD BLOCK_SIZE_MIN
+#endif
+
 #ifndef ASSERT
 #ifdef TLSF_ENABLE_ASSERT
 #include <assert.h>
@@ -72,6 +81,12 @@ _Static_assert(FL_COUNT <= 32, "index too large");
 _Static_assert(SL_COUNT <= 32, "index too large");
 _Static_assert(FL_COUNT == _TLSF_FL_COUNT, "invalid level configuration");
 _Static_assert(SL_COUNT == _TLSF_SL_COUNT, "invalid level configuration");
+_Static_assert(TLSF_SPLIT_THRESHOLD >= BLOCK_SIZE_MIN,
+               "split threshold must be at least minimum block size");
+_Static_assert(_TLSF_FL_COUNT >= 1,
+               "TLSF_MAX_POOL_BITS too small for this architecture");
+_Static_assert(FL_MAX < __SIZE_WIDTH__,
+               "TLSF_MAX_POOL_BITS must be less than pointer width");
 
 /*
  * Default (weak) implementation of tlsf_resize.
@@ -205,6 +220,14 @@ INLINE tlsf_block_t *block_link_next(tlsf_block_t *block)
 INLINE bool block_can_split(tlsf_block_t *block, size_t size)
 {
     return block_size(block) >= sizeof(tlsf_block_t) + size;
+}
+
+/* When trimming, require the remainder to be at least TLSF_SPLIT_THRESHOLD
+ * to avoid creating tiny free blocks that waste metadata overhead.
+ */
+INLINE bool block_can_trim(tlsf_block_t *block, size_t size)
+{
+    return block_size(block) >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
 }
 
 INLINE void block_set_free(tlsf_block_t *block, bool free)
@@ -443,7 +466,7 @@ INLINE tlsf_block_t *block_merge_next(tlsf_t *t, tlsf_block_t *block)
 INLINE void block_rtrim_free(tlsf_t *t, tlsf_block_t *block, size_t size)
 {
     ASSERT(block_is_free(block), "block must be free");
-    if (!block_can_split(block, size))
+    if (!block_can_trim(block, size))
         return;
     tlsf_block_t *rest = block_split(block, size);
     block_link_next(block);
@@ -455,7 +478,7 @@ INLINE void block_rtrim_free(tlsf_t *t, tlsf_block_t *block, size_t size)
 INLINE void block_rtrim_used(tlsf_t *t, tlsf_block_t *block, size_t size)
 {
     ASSERT(!block_is_free(block), "block must be used");
-    if (!block_can_split(block, size))
+    if (!block_can_trim(block, size))
         return;
     tlsf_block_t *rest = block_split(block, size);
     block_set_prev_free(rest, false);
@@ -507,6 +530,14 @@ static bool arena_grow(tlsf_t *t, size_t size)
 
     size_t req_size =
         (t->size ? t->size + BLOCK_OVERHEAD : 2 * BLOCK_OVERHEAD) + size;
+
+    /* Pool cannot exceed the maximum addressable range for the configured
+     * first-level index.  With reduced TLSF_MAX_POOL_BITS, this prevents
+     * merged blocks from overflowing the mapping function.
+     */
+    if (UNLIKELY(req_size > (size_t) 1 << FL_MAX))
+        return false;
+
     void *addr = tlsf_resize(t, req_size);
     if (!addr)
         return false;
@@ -567,6 +598,10 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
      */
     size_t old_size = t->size;
     size_t new_total_size = t->size + aligned_size + BLOCK_OVERHEAD;
+
+    /* Reject if expanded pool would exceed the maximum addressable range. */
+    if (UNLIKELY(new_total_size > (size_t) 1 << FL_MAX))
+        return 0;
 
     /* For dynamic pools, request the backend to extend.
      * For static pools, the caller provides adjacent memory directly.
