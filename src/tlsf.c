@@ -91,9 +91,8 @@ __attribute__((weak)) void *tlsf_resize(tlsf_t *t, size_t size)
 
 INLINE uint32_t bitmap_ffs(uint32_t x)
 {
-    uint32_t i = (uint32_t) __builtin_ffs((int32_t) x);
-    ASSERT(i, "no set bit found");
-    return i - 1U;
+    ASSERT(x, "no set bit found");
+    return (uint32_t) __builtin_ctz(x);
 }
 
 INLINE uint32_t log2floor(size_t x)
