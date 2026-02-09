@@ -1023,12 +1023,47 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     /* Set up sentinel at the end of the free block */
     tlsf_block_t *sentinel = block_link_next(block);
     sentinel->header = BLOCK_BIT_PREV_FREE;
+    check_sentinel(sentinel);
 
     t->size = free_size + 2 * BLOCK_OVERHEAD;
 
     block_poison_free(block);
 
     return free_size;
+}
+
+void tlsf_pool_reset(tlsf_t *t)
+{
+    if (!t || !t->arena)
+        return;
+
+    /* Unpoison the entire pool for ASan. */
+    ASAN_UNPOISON(t->arena, t->size);
+
+    /* Clear bitmaps. */
+    t->fl = 0;
+    memset(t->sl, 0, sizeof(t->sl));
+
+    /* Reset all bin pointers to sentinel. */
+    for (uint32_t i = 0; i < FL_COUNT; i++)
+        for (uint32_t j = 0; j < SL_COUNT; j++)
+            t->block[i][j] = &t->block_null;
+
+    /* Reconstruct the single free block spanning the entire pool.
+     * Same layout as the second half of tlsf_pool_init().
+     */
+    size_t free_size = t->size - 2 * BLOCK_OVERHEAD;
+
+    tlsf_block_t *block = to_block((char *) t->arena - BLOCK_OVERHEAD);
+    block->header = free_size | BLOCK_BIT_FREE;
+    block_insert(t, block);
+
+    /* Sentinel at the end of the pool. */
+    tlsf_block_t *sentinel = block_link_next(block);
+    sentinel->header = BLOCK_BIT_PREV_FREE;
+    check_sentinel(sentinel);
+
+    block_poison_free(block);
 }
 
 #ifdef TLSF_ENABLE_CHECK

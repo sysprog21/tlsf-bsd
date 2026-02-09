@@ -128,6 +128,24 @@ size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
 size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes);
 
 /**
+ * Reset a static pool to its initial state, discarding all allocations.
+ * Bounded-time bulk deallocation: clears bitmaps, recreates a single
+ * free block.  Cost is O(FL_COUNT * SL_COUNT) for the bin reset, which
+ * is fixed at compile time.
+ *
+ * Only valid for pools created with tlsf_pool_init().
+ * Does nothing for dynamic pools or uninitialized instances.
+ *
+ * WARNING: All pointers previously returned by tlsf_malloc/aalloc/realloc
+ * become invalid after reset.  Passing stale pointers to tlsf_free or
+ * tlsf_realloc causes undefined behavior (silent metadata corruption in
+ * release builds, assertion failure in debug builds).
+ *
+ * @param t The TLSF allocator instance
+ */
+void tlsf_pool_reset(tlsf_t *t);
+
+/**
  * Allocate memory from the pool.
  *
  * @param t    The TLSF allocator instance

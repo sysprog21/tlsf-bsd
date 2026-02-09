@@ -771,6 +771,126 @@ static void zero_size_align_test(tlsf_t *t)
     printf(". done\n");
 }
 
+/* Test pool reset: O(1) bulk deallocation for static pools. */
+static void pool_reset_test(void)
+{
+    printf("Pool reset test: ");
+    fflush(stdout);
+
+    /* Test 1: Basic reset - allocate, reset, verify clean state */
+    {
+        static char pool[1024 * 64]; /* 64 KB */
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
+        assert(usable > 0);
+
+        /* Fill pool with allocations */
+        void *ptrs[100];
+        int count = 0;
+        for (int i = 0; i < 100; i++) {
+            ptrs[i] = tlsf_malloc(&t, 200);
+            if (!ptrs[i])
+                break;
+            memset(ptrs[i], 0xAB, 200);
+            count++;
+        }
+        assert(count > 0);
+
+        /* Reset discards all allocations */
+        tlsf_pool_reset(&t);
+        tlsf_check(&t);
+
+        /* Pool should be back to initial state: one free block */
+        tlsf_stats_t stats;
+        int rc = tlsf_get_stats(&t, &stats);
+        assert(rc == 0);
+        assert(stats.free_count == 1);
+        assert(stats.total_used == 0);
+        assert(stats.total_free == usable);
+
+        /* Pool should be usable after reset */
+        void *p = tlsf_malloc(&t, 100);
+        assert(p);
+        tlsf_free(&t, p);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 2: Multiple resets in a loop */
+    {
+        static char pool[16384];
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
+        assert(usable > 0);
+
+        for (int round = 0; round < 10; round++) {
+            void *p = tlsf_malloc(&t, 100 * ((size_t) round + 1));
+            assert(p);
+            void *q = tlsf_malloc(&t, 50);
+            assert(q);
+            tlsf_free(&t, p);
+            /* q is intentionally leaked - reset discards it */
+
+            tlsf_pool_reset(&t);
+            tlsf_check(&t);
+
+            /* Verify clean state each round */
+            tlsf_stats_t stats;
+            tlsf_get_stats(&t, &stats);
+            assert(stats.free_count == 1);
+            assert(stats.total_used == 0);
+            assert(stats.total_free == usable);
+        }
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 3: Reset after append_pool preserves expanded capacity */
+    {
+        static char combined[8192];
+        tlsf_t t;
+        size_t half = 4096;
+        size_t usable = tlsf_pool_init(&t, combined, half);
+        assert(usable > 0);
+
+        /* Append second half (adjacent by construction) */
+        size_t appended = tlsf_append_pool(&t, combined + half, half);
+        assert(appended > 0);
+
+        /* Record full capacity before allocations */
+        tlsf_stats_t full_stats;
+        tlsf_get_stats(&t, &full_stats);
+        size_t full_free = full_stats.total_free;
+        assert(full_free > usable); /* Expanded pool is larger */
+
+        /* Allocate and fragment */
+        void *p1 = tlsf_malloc(&t, 100);
+        assert(p1);
+
+        /* Reset should restore full expanded capacity */
+        tlsf_pool_reset(&t);
+        tlsf_check(&t);
+
+        tlsf_stats_t after;
+        tlsf_get_stats(&t, &after);
+        assert(after.free_count == 1);
+        assert(after.total_used == 0);
+        assert(after.total_free == full_free);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 4: Reset on NULL or dynamic pool is a no-op */
+    {
+        tlsf_pool_reset(NULL);
+
+        tlsf_t t = TLSF_INIT;
+        tlsf_pool_reset(&t); /* arena is NULL, no-op */
+    }
+    printf(". done\n");
+}
+
 int main(void)
 {
     PAGE = (size_t) sysconf(_SC_PAGESIZE);
@@ -809,6 +929,9 @@ int main(void)
 
     /* Run static pool test */
     static_pool_test();
+
+    /* Run pool reset test */
+    pool_reset_test();
 
     puts("OK!");
     return 0;
