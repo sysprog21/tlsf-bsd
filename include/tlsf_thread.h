@@ -140,10 +140,7 @@ extern "C" {
                 ((unsigned) ((uintptr_t) thrd_current() ^ \
                              ((uintptr_t) thrd_current() >> 16)))
 #endif
-#elif defined(C11_THREADS_SUPPORT) || defined(TLSF_C11_THREADS)
-#define TLSF_THREAD_HINT() 0U
-#else
-#if defined(TLSF_THREAD_POSIX)
+#elif defined(TLSF_THREAD_POSIX)
 #define TLSF_THREAD_HINT()                    \
                 ((unsigned) ((uintptr_t) pthread_self() ^ \
                              ((uintptr_t) pthread_self() >> 16)))
@@ -153,9 +150,9 @@ extern "C" {
 #define TLSF_THREAD_HINT() 0U
 #endif
 #endif
-#endif
 
 #endif
+
 
 #if defined(_MSC_VER)
 #define TLSF_MSVC_ALIGN(x) __declspec(align(x))
