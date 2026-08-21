@@ -2,8 +2,8 @@
 /*
  * Thread-safety stress test for the per-arena TLSF wrapper.
  *
- * Spawns multiple threads that concurrently malloc/free/realloc from a
- * shared tlsf_thread_t instance.  Verifies:
+ * Spawns multiple threads that concurrently malloc/free/realloc from a shared
+ * tlsf_thread_t instance. Verifies:
  *   - No data corruption (fill-pattern integrity)
  *   - No double-free or use-after-free (ASan / TLSF_ENABLE_CHECK)
  *   - Arena distribution (multiple arenas actually used)
@@ -11,7 +11,7 @@
  */
 
 #include <assert.h>
-//#include <pthread.h>
+// #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #if defined(_MSC_VER)
@@ -24,9 +24,7 @@
 
 #include "tlsf_thread.h"
 
-/* ------------------------------------------------------------------ */
-/* Test parameters (tuned for < 2s on modern hardware)                 */
-/* ------------------------------------------------------------------ */
+/* Test parameters (tuned for < 2s on modern hardware) */
 
 #define POOL_SIZE (4 * 1024 * 1024) /* 4 MB static pool */
 #define NUM_THREADS 8
@@ -45,28 +43,31 @@ static tlsf_thread_t ts;
 #define TLSF_THREAD_RETURN 0
 #elif defined(TLSF_THREAD_POSIX)
 #define TLSF_THREAD_T pthread_t
-#define TLSF_CREATE_THREAD(thrd, func, arg) pthread_create(thrd, NULL, func, arg)
+#define TLSF_CREATE_THREAD(thrd, func, arg) \
+    pthread_create(thrd, NULL, func, arg)
 #define TLSF_JOIN_THREAD(thrd) pthread_join((thrd), NULL)
-#define TLSF_THREAD_CONVENTION void*
+#define TLSF_THREAD_CONVENTION void *
 #define TLSF_THREAD_RETURN NULL
 #elif defined(TLSF_THREAD_WIN)
 #define TLSF_THREAD_T HANDLE
-#define TLSF_CREATE_THREAD(thrd, func, arg) \
-    ((*(thrd) = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)(func), (arg), 0, NULL)) != NULL ? 0 : -1)
-#define TLSF_JOIN_THREAD(thrd) (WaitForSingleObject((thrd), INFINITE), CloseHandle((thrd)), 0)
+#define TLSF_CREATE_THREAD(thrd, func, arg)                                   \
+    ((*(thrd) = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) (func), (arg), \
+                             0, NULL)) != NULL                                \
+         ? 0                                                                  \
+         : -1)
+#define TLSF_JOIN_THREAD(thrd) \
+    (WaitForSingleObject((thrd), INFINITE), CloseHandle((thrd)), 0)
 #define TLSF_THREAD_CONVENTION DWORD WINAPI
 #define TLSF_THREAD_RETURN 0
 #endif
 
 #if defined(_MSC_VER)
-#define TLSF_RAND(x) (rand_s((x)), (unsigned)*(x))
+#define TLSF_RAND(x) (rand_s((x)), (unsigned) *(x))
 #else
 #define TLSF_RAND(x) (rand_r(x))
 #endif
 
-/* ------------------------------------------------------------------ */
-/* Per-thread work                                                     */
-/* ------------------------------------------------------------------ */
+/* Per-thread work */
 
 typedef struct {
     int id;
@@ -108,7 +109,8 @@ static TLSF_THREAD_CONVENTION thread_func(void *arg)
 
         case 2: /* free */
             if (count > 0) {
-                int idx = (int) ((unsigned) TLSF_RAND(&seed) % (unsigned) count);
+                int idx =
+                    (int) ((unsigned) TLSF_RAND(&seed) % (unsigned) count);
                 /* Verify fill pattern before freeing */
                 uint8_t *data = (uint8_t *) ptrs[idx];
                 for (size_t i = 0; i < sizes[idx]; i++) {
@@ -128,9 +130,11 @@ static TLSF_THREAD_CONVENTION thread_func(void *arg)
 
         case 3: /* realloc */
             if (count > 0) {
-                int idx = (int) ((unsigned) TLSF_RAND(&seed) % (unsigned) count);
+                int idx =
+                    (int) ((unsigned) TLSF_RAND(&seed) % (unsigned) count);
                 size_t old_sz = sizes[idx];
-                size_t new_sz = (size_t) (TLSF_RAND(&seed) % MAX_ALLOC_SIZE) + 1;
+                size_t new_sz =
+                    (size_t) (TLSF_RAND(&seed) % MAX_ALLOC_SIZE) + 1;
 
                 void *p = tlsf_thread_realloc(&ts, ptrs[idx], new_sz);
                 if (p) {
@@ -169,9 +173,7 @@ static TLSF_THREAD_CONVENTION thread_func(void *arg)
     return TLSF_THREAD_RETURN;
 }
 
-/* ------------------------------------------------------------------ */
-/* Test: multi-threaded stress                                         */
-/* ------------------------------------------------------------------ */
+/* Test: multi-threaded stress */
 
 static void stress_test(void)
 {
@@ -222,9 +224,7 @@ static void stress_test(void)
     tlsf_thread_destroy(&ts);
 }
 
-/* ------------------------------------------------------------------ */
-/* Test: aligned allocation under contention                           */
-/* ------------------------------------------------------------------ */
+/* Test: aligned allocation under contention */
 
 static TLSF_THREAD_CONVENTION aligned_thread_func(void *arg)
 {
@@ -276,9 +276,7 @@ static void aligned_test(void)
     printf("done\n");
 }
 
-/* ------------------------------------------------------------------ */
-/* Test: reset under quiescence                                        */
-/* ------------------------------------------------------------------ */
+/* Test: reset under quiescence */
 
 static void reset_test(void)
 {
@@ -317,9 +315,7 @@ static void reset_test(void)
     printf("done\n");
 }
 
-/* ------------------------------------------------------------------ */
-/* Test: single-threaded basic sanity                                  */
-/* ------------------------------------------------------------------ */
+/* Test: single-threaded basic sanity */
 
 static void basic_test(void)
 {
@@ -385,9 +381,7 @@ static void basic_test(void)
     printf("done\n");
 }
 
-/* ------------------------------------------------------------------ */
-/* Main                                                                */
-/* ------------------------------------------------------------------ */
+/* Main */
 
 int main(void)
 {

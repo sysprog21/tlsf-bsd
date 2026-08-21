@@ -4,8 +4,7 @@
  * "LICENSE" for information on usage and redistribution of this file.
  */
 
-/*
- * Benchmark methodology:
+/* Benchmark methodology:
  * - Multiple iterations for statistical significance
  * - Warmup phase before measurements
  * - Report median and percentiles (not just mean)
@@ -55,8 +54,10 @@ static inline uint64_t get_time_ns(void)
 {
     if (timebase_info.denom == 0)
         mach_timebase_info(&timebase_info);
-    /* Avoid overflow: divide first when numer <= denom (common case),
-     * otherwise use __uint128_t for intermediate result */
+
+    /* Avoid overflow: divide first when numer <= denom (common case), otherwise
+     * use __uint128_t for intermediate result
+     */
     uint64_t ticks = mach_absolute_time();
     if (timebase_info.numer <= timebase_info.denom)
         return ticks / timebase_info.denom * timebase_info.numer;

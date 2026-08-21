@@ -17,11 +17,9 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
-/*
- * Second-level subdivisions: 32 bins per first-level class.
- * Max internal fragmentation bounded by 1/SL_COUNT = 3.125% (was 6.25%
- * with 16 bins). Control structure size increases ~2x for the block
- * pointer array.
+/* Second-level subdivisions: 32 bins per first-level class. Max internal
+ * fragmentation bounded by 1/SL_COUNT = 3.125% (was 6.25% with 16 bins).
+ * Control structure size increases ~2x for the block pointer array.
  */
 #define _TLSF_SL_COUNT 32
 
@@ -32,7 +30,8 @@ extern "C" {
 #else
 #define _TLSF_SIZE_WIDTH 32
 #endif
-#elif defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) ||  defined(__clang__)
+#elif defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
+    defined(__clang__)
 #define _TLSF_SIZE_WIDTH __SIZE_WIDTH__
 #else
 #if INTPTR_MAX == INT64_MAX
@@ -45,11 +44,10 @@ extern "C" {
 #endif
 #endif
 
-/*
- * Configurable maximum pool size: define TLSF_MAX_POOL_BITS to clamp
- * the first-level index, reducing the tlsf_t control structure size.
- * Pool cannot exceed 2^TLSF_MAX_POOL_BITS bytes.
- * E.g. -DTLSF_MAX_POOL_BITS=20 for a 1MB-max pool.
+/* Configurable maximum pool size: define TLSF_MAX_POOL_BITS to clamp the
+ * first-level index, reducing the tlsf_t control structure size. Pool cannot
+ * exceed 2^TLSF_MAX_POOL_BITS bytes. E.g. -DTLSF_MAX_POOL_BITS=20 for a 1MB-max
+ * pool.
  */
 #ifdef TLSF_MAX_POOL_BITS
 #define _TLSF_FL_MAX TLSF_MAX_POOL_BITS
@@ -72,22 +70,22 @@ extern "C" {
 #define TLSF_INIT ((tlsf_t) {.size = 0})
 
 /* TLSF_INIT_STATIC is need to be used instead of TLSF_INIT for initializing
-static objects for cross platform compatibility */
+ * static objects for cross platform compatibility
+ */
 #if defined(_MSC_VER)
-#define TLSF_INIT_STATIC { .size = 0 }
+#define TLSF_INIT_STATIC {.size = 0}
 #else
 #define TLSF_INIT_STATIC ((tlsf_t) {.size = 0})
 #endif
 
-/*
- * Block header structure.
+/* Block header structure.
  *
- * prev:      Pointer to the previous physical block.  Only valid when the
+ * prev: Pointer to the previous physical block. Only valid when the
  *            previous block is free; physically stored at the tail of that
  *            block's payload.
- * header:    Size (upper bits) | status bits (lower 2 bits).
- * next_free: Next block in the same free list (only valid when free).
- * prev_free: Previous block in the same free list (only valid when free).
+ * header: Size (upper bits) | status bits (lower 2 bits). next_free: Next block
+ * in the same free list (only valid when free). prev_free: Previous block in
+ * the same free list (only valid when free).
  */
 struct tlsf_block {
     struct tlsf_block *prev;
@@ -104,19 +102,19 @@ typedef struct {
 } tlsf_t;
 
 /**
- * Callback to grow or query the memory arena (dynamic pools only).
- * Users of tlsf_pool_init() need not provide this function.
- * A weak default returning NULL is provided in tlsf.c; dynamic pool
- * users MUST override it, otherwise allocations will silently fail.
+ * Callback to grow or query the memory arena (dynamic pools only). Users of
+ * tlsf_pool_init() need not provide this function. A weak default returning
+ * NULL is provided in tlsf.c; dynamic pool users MUST override it, otherwise
+ * allocations will silently fail.
  */
 void *tlsf_resize(tlsf_t *, size_t);
 
 /**
  * Allocate memory with a specified alignment.
  *
- * @param t     The TLSF allocator instance
+ * @param t The TLSF allocator instance
  * @param align Alignment in bytes; must be a non-zero power of two
- * @param size  Requested allocation size in bytes; need not be a multiple of
+ * @param size Requested allocation size in bytes; need not be a multiple of
  *              @align (follows POSIX posix_memalign semantics; C11
  *              aligned_alloc required size % align == 0 but C23 and
  *              common implementations dropped that constraint)
@@ -127,57 +125,60 @@ void *tlsf_resize(tlsf_t *, size_t);
 void *tlsf_aalloc(tlsf_t *, size_t align, size_t size);
 
 /**
- * Append a memory block to an existing pool, potentially coalescing with
- * the last block if it's free. Returns the number of bytes actually used
- * from the memory block for pool expansion.
+ * Append a memory block to an existing pool, potentially coalescing with the
+ * last block if it's free.
  *
- * @param tlsf The TLSF allocator instance
- * @param mem Pointer to the memory block to append
- * @param size Size of the memory block in bytes
- * @return Number of bytes used from the memory block, 0 on failure
+ * Returns the number of bytes actually used from the memory block for pool
+ * expansion.
+ *
+ * @tlsf : The TLSF allocator instance
+ * @mem : Pointer to the memory block to append
+ * @size : Size of the memory block in bytes
+ *
+ * Return Number of bytes used from the memory block, 0 on failure
  */
 size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
 
 /**
- * Initialize the allocator with a fixed-size memory pool.
- * The pool will not auto-grow via tlsf_resize(); when the pool is
- * exhausted, allocations return NULL.  Callers may still extend the
- * pool explicitly via tlsf_append_pool() with adjacent memory.
- * This avoids the need to implement tlsf_resize().
+ * Initialize the allocator with a fixed-size memory pool. The pool will not
+ * auto-grow via tlsf_resize(); when the pool is exhausted, allocations return
+ * NULL. Callers may still extend the pool explicitly via tlsf_append_pool()
+ * with adjacent memory. This avoids the need to implement tlsf_resize().
  *
- * Multiple independent instances are supported by initializing separate
- * tlsf_t structures with their own memory regions.
+ * Multiple independent instances are supported by initializing separate tlsf_t
+ * structures with their own memory regions.
  *
- * @param t     The TLSF allocator instance (will be zero-initialized)
- * @param mem   Pointer to the memory region to use as the pool
- * @param bytes Total size of the memory region in bytes
- * @return      Usable bytes in the pool, or 0 on failure
+ * @t : The TLSF allocator instance (will be zero-initialized)
+ * @mem : Pointer to the memory region to use as the pool
+ * @bytes : Total size of the memory region in bytes
+ *
+ * Return Usable bytes in the pool, or 0 on failure
  */
 size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes);
 
 /**
  * Reset a static pool to its initial state, discarding all allocations.
- * Bounded-time bulk deallocation: clears bitmaps, recreates a single
- * free block.  Cost is O(FL_COUNT * SL_COUNT) for the bin reset, which
- * is fixed at compile time.
+ * Bounded-time bulk deallocation: clears bitmaps, recreates a single free
+ * block. Cost is O(FL_COUNT * SL_COUNT) for the bin reset, which is fixed at
+ * compile time.
  *
- * Only valid for pools created with tlsf_pool_init().
- * Does nothing for dynamic pools or uninitialized instances.
+ * Only valid for pools created with tlsf_pool_init(). Does nothing for dynamic
+ * pools or uninitialized instances.
  *
  * WARNING: All pointers previously returned by tlsf_malloc/aalloc/realloc
- * become invalid after reset.  Passing stale pointers to tlsf_free or
- * tlsf_realloc causes undefined behavior (silent metadata corruption in
- * release builds, assertion failure in debug builds).
+ * become invalid after reset. Passing stale pointers to tlsf_free or
+ * tlsf_realloc causes undefined behavior (silent metadata corruption in release
+ * builds, assertion failure in debug builds).
  *
- * @param t The TLSF allocator instance
+ * @t : The TLSF allocator instance
  */
 void tlsf_pool_reset(tlsf_t *t);
 
 /**
  * Allocate memory from the pool.
  *
- * @param t    The TLSF allocator instance
- * @param size Requested allocation size in bytes.  A zero @size request
+ * @param t The TLSF allocator instance
+ * @param size Requested allocation size in bytes. A zero @size request
  *             returns a unique minimum-sized allocation (POSIX-compatible
  *             behavior), not NULL.
  * @return Pointer to at least @size bytes, aligned to ALIGN_SIZE (8 on
@@ -192,14 +193,14 @@ void *tlsf_realloc(tlsf_t *, void *, size_t);
 void tlsf_free(tlsf_t *, void *);
 
 /**
- * Return the usable size of an existing allocation.
- * The usable size may exceed the originally requested size due to
- * alignment rounding and bin-class quantization.
- * Equivalent to POSIX malloc_usable_size().
+ * Return the usable size of an existing allocation. The usable size may exceed
+ * the originally requested size due to alignment rounding and bin-class
+ * quantization. Equivalent to POSIX malloc_usable_size().
  *
- * @param ptr Pointer previously returned by tlsf_malloc/aalloc/realloc.
- *            Behavior is undefined if ptr has been freed.
- * @return Usable payload bytes, or 0 if ptr is NULL
+ * @ptr : Pointer previously returned by tlsf_malloc/aalloc/realloc. Behavior is
+ * undefined if ptr has been freed.
+ *
+ * Return Usable payload bytes, or 0 if ptr is NULL
  */
 size_t tlsf_usable_size(void *ptr);
 
@@ -226,9 +227,10 @@ typedef struct {
 
 /**
  * Collect heap statistics by walking all blocks.
- * @param t The TLSF allocator instance
- * @param stats Output structure to fill with statistics
- * @return 0 on success, -1 if t or stats is NULL
+ * @t : The TLSF allocator instance
+ * @stats : Output structure to fill with statistics
+ *
+ * Return 0 on success, -1 if t or stats is NULL
  */
 int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats);
 

@@ -5,23 +5,19 @@
  * "LICENSE" for information on usage and redistribution of this file.
  */
 
-/*
- * Thread-safe TLSF wrapper: per-arena fine-grained locking.
+/* Thread-safe TLSF wrapper: per-arena fine-grained locking.
  *
- * See include/tlsf_thread.h for the design rationale and API
- * documentation.
+ * See include/tlsf_thread.h for the design rationale and API documentation.
  */
 
 #include <string.h>
 
 #include "tlsf_thread.h"
 
-/*
- * Hash the thread hint to select a preferred arena.
+/* Hash the thread hint to select a preferred arena.
  *
- * The mixing function distributes thread IDs that may differ only in
- * their low bits (sequential handles, page-aligned stacks) across all
- * arenas.
+ * The mixing function distributes thread IDs that may differ only in their low
+ * bits (sequential handles, page-aligned stacks) across all arenas.
  */
 static inline int arena_select(const tlsf_thread_t *ts)
 {
@@ -32,9 +28,8 @@ static inline int arena_select(const tlsf_thread_t *ts)
     return (int) (h % (unsigned) ts->count);
 }
 
-/*
- * Find which arena owns a pointer by range check.
- * O(TLSF_ARENA_COUNT) -- effectively O(1) for small N.
+/* Find which arena owns a pointer by range check. O(TLSF_ARENA_COUNT) --
+ * effectively O(1) for small N.
  * Returns -1 if the pointer is not from any arena.
  */
 static inline int arena_find(const tlsf_thread_t *ts, const void *ptr)
@@ -48,10 +43,10 @@ static inline int arena_find(const tlsf_thread_t *ts, const void *ptr)
     return -1;
 }
 
-/*
- * Try to allocate from arenas other than `skip`, using non-blocking
- * try-lock first, then blocking acquire.  Returns NULL if all arenas
- * are exhausted.
+/* Try to allocate from arenas other than `skip`, using non-blocking try-lock
+ * first, then blocking acquire.
+ *
+ * Returns NULL if all arenas are exhausted.
  */
 static void *arena_fallback_malloc(tlsf_thread_t *ts, int skip, size_t size)
 {
@@ -117,9 +112,8 @@ size_t tlsf_thread_init(tlsf_thread_t *ts, void *mem, size_t bytes)
 
     memset(ts, 0, sizeof(*ts));
 
-    /*
-     * Determine how many arenas we can fit.  Reduce the count if the
-     * per-arena share is too small for a viable TLSF pool.
+    /* Determine how many arenas we can fit. Reduce the count if the per-arena
+     * share is too small for a viable TLSF pool.
      */
     int count = TLSF_ARENA_COUNT;
     size_t min_arena = 256;
@@ -229,10 +223,9 @@ void *tlsf_thread_realloc(tlsf_thread_t *ts, void *ptr, size_t size)
     if (idx < 0)
         return NULL;
 
-    /*
-     * Try in-place realloc within the owning arena.  We also grab
-     * the old usable size while we hold the lock, in case we need
-     * to do a cross-arena relocation afterwards.
+    /* Try in-place realloc within the owning arena. We also grab the old usable
+     * size while we hold the lock, in case we need to do a cross-arena
+     * relocation afterwards.
      */
     size_t old_size;
     TLSF_LOCK_ACQUIRE(&ts->arenas[idx].lock);
@@ -243,10 +236,8 @@ void *tlsf_thread_realloc(tlsf_thread_t *ts, void *ptr, size_t size)
     if (new_ptr)
         return new_ptr;
 
-    /*
-     * In-arena realloc failed (arena exhausted for the new size).
-     * The old block is untouched.  Allocate from any arena, copy,
-     * then free the original.
+    /* In-arena realloc failed (arena exhausted for the new size). The old block
+     * is untouched. Allocate from any arena, copy, then free the original.
      */
     new_ptr = tlsf_thread_malloc(ts, size);
     if (!new_ptr)

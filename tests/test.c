@@ -11,9 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
-#include <windows.h>
 #include <stddef.h>
 #include <time.h>
+#include <windows.h>
 #else
 #include <sys/mman.h>
 #include <time.h>
@@ -33,22 +33,22 @@ size_t get_page_size(void)
 {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    return (size_t)si.dwPageSize;
+    return (size_t) si.dwPageSize;
 }
 
-void* tlsf_resize(tlsf_t* t, size_t req_size)
+void *tlsf_resize(tlsf_t *t, size_t req_size)
 {
-    (void)t;
+    (void) t;
 
-    // This is analogue mmap with flag MAP_NORESERVE to VirtualAlloc with MEM_RESERVE
+    // This is analogue mmap with flag MAP_NORESERVE to VirtualAlloc with
+    // MEM_RESERVE
     if (!start_addr) {
-        start_addr = VirtualAlloc(
-            NULL,
-            MAX_PAGES * PAGE,
-            MEM_RESERVE,    // Only reserve address space 
-            PAGE_READWRITE       // Rights for read and write 
+        start_addr = VirtualAlloc(NULL, MAX_PAGES * PAGE,
+                                  MEM_RESERVE,    // Only reserve address space
+                                  PAGE_READWRITE  // Rights for read and write
         );
-        if (!start_addr) return NULL;
+        if (!start_addr)
+            return NULL;
     }
 
     size_t req_pages = (req_size + PAGE - 1) / PAGE;
@@ -57,23 +57,22 @@ void* tlsf_resize(tlsf_t* t, size_t req_size)
 
     if (req_pages != curr_pages) {
         if (req_pages < curr_pages) {
-            // Analogue for madvise(..., MADV_DONTNEED) to VirtualFree with MEM_DECOMMIT
-            // Free physical memory (commit), with reserved addresses
-            VirtualFree(
-                (char*)start_addr + PAGE * req_pages,
-                (size_t)(curr_pages - req_pages) * PAGE,
-                MEM_DECOMMIT     // physical pages to zero
+            // Analogue for madvise(..., MADV_DONTNEED) to VirtualFree with
+            // MEM_DECOMMIT Free physical memory (commit), with reserved
+            // addresses
+            VirtualFree((char *) start_addr + PAGE * req_pages,
+                        (size_t) (curr_pages - req_pages) * PAGE,
+                        MEM_DECOMMIT  // physical pages to zero
             );
-        }
-        else {
-            // Commit reserved memory            
-            void* commit_ptr = VirtualAlloc(
-                start_addr,      // base address is the same
-                req_pages * PAGE,
-                MEM_COMMIT,      // Commit new pages
-                PAGE_READWRITE
-            );
-            if (!commit_ptr) return NULL;
+        } else {
+            // Commit reserved memory
+            void *commit_ptr =
+                VirtualAlloc(start_addr,  // base address is the same
+                             req_pages * PAGE,
+                             MEM_COMMIT,  // Commit new pages
+                             PAGE_READWRITE);
+            if (!commit_ptr)
+                return NULL;
         }
 
         curr_pages = req_pages;
@@ -112,16 +111,14 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     void **p = (void **) malloc(maxitems * sizeof(void *));
     assert(p);
 
-    /* Throttle tlsf_check() frequency to avoid O(n^2) overhead.
-     * Per-operation checking is fine for small pools (< 256 items).
-     * For large pools, check every N operations where N scales with pool
-     * size, bounding total check work to ~256 full heap walks per phase.
+    /* Throttle tlsf_check() frequency to avoid O(n^2) overhead. Per-operation
+     * checking is fine for small pools (< 256 items). For large pools, check
+     * every N operations where N scales with pool size, bounding total check
+     * work to ~256 full heap walks per phase.
      */
     size_t check_stride = maxitems > 256 ? (maxitems + 255) / 256 : 1;
 
-    /* Allocate random sizes up to the cap threshold.
-     * Track them in an array.
-     */
+    /* Allocate random sizes up to the cap threshold. Track them in an array. */
     int64_t rest = (int64_t) spacelen * (rand() % 6 + 1);
     unsigned i = 0;
     while (rest > 0 && i < maxitems) {
@@ -160,8 +157,8 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     /* Final consistency check after all allocations. */
     tlsf_check(t);
 
-    /* Randomly deallocate the memory blocks until all of them are freed.
-     * The free space should match the free space after initialisation.
+    /* Randomly deallocate the memory blocks until all of them are freed. The
+     * free space should match the free space after initialisation.
      */
     size_t freed = 0;
     for (unsigned n = i; n;) {
@@ -197,7 +194,7 @@ static int msvc_large_rand(void)
 
 static void random_sizes_test(tlsf_t *t)
 {
-    const size_t sizes[] = { 16, 32, 64, 128, 256, 512, 1024, 1024 * 1024 };
+    const size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 1024 * 1024};
 
     printf("Random allocation test: ");
     for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
@@ -205,9 +202,9 @@ static void random_sizes_test(tlsf_t *t)
 
         while (n--)
 #if defined(_MSC_VER)
-            random_test(t, sizes[i], (size_t)msvc_large_rand() % sizes[i] + 1);
+            random_test(t, sizes[i], (size_t) msvc_large_rand() % sizes[i] + 1);
 #else
-            random_test(t, sizes[i], (size_t)rand() % sizes[i] + 1);
+            random_test(t, sizes[i], (size_t) rand() % sizes[i] + 1);
 #endif
         printf(".");
         fflush(stdout);
@@ -239,8 +236,8 @@ static void large_size_test(tlsf_t *t)
     printf("Large allocation test: ");
     fflush(stdout);
 
-    /* Cap test size to fit within test pool limits.
-     * 64-bit: up to 256MB, 32-bit: up to 32MB (pool is 128MB)
+    /* Cap test size to fit within test pool limits. 64-bit: up to 256MB,
+     * 32-bit: up to 32MB (pool is 128MB)
      */
 #if _TLSF_SIZE_WIDTH == 64 || defined(__LP64__) || defined(_LP64)
     size_t max_test = (size_t) 1 << 28; /* 256 MB */
@@ -253,7 +250,7 @@ static void large_size_test(tlsf_t *t)
     size_t s = 1;
     while (s <= max_test) {
         large_alloc(t, s);
-        s *= 2;        
+        s *= 2;
     }
     printf(".");
     fflush(stdout);
@@ -299,18 +296,17 @@ static void append_pool_test(tlsf_t *t)
     printf("done\n");
 }
 
-/* Test internal fragmentation by allocating various sizes and measuring
- * the overhead. With SL=32, max internal fragmentation should be ~3.125%
- * (1/32) compared to ~6.25% (1/16) with SL=16.
+/* Test internal fragmentation by allocating various sizes and measuring the
+ * overhead. With SL=32, max internal fragmentation should be ~3.125% (1/32)
+ * compared to ~6.25% (1/16) with SL=16.
  */
 static void fragmentation_test(tlsf_t *t)
 {
     printf("Internal fragmentation test:\n");
 
-    /*
-     * Split into "small" (affected by min block size) and "large" (where
-     * SL subdivision is the primary factor). BLOCK_SIZE_SMALL is 256 on
-     * 64-bit with SL=32.
+    /* Split into "small" (affected by min block size) and "large" (where SL
+     * subdivision is the primary factor). BLOCK_SIZE_SMALL is 256 on 64-bit
+     * with SL=32.
      */
     const size_t small_sizes[] = {17, 31, 33, 47, 63, 65, 95, 127};
     const size_t large_sizes[] = {
@@ -383,18 +379,17 @@ static void fragmentation_test(tlsf_t *t)
 
 /* Test backward expansion optimization in realloc.
  *
- * When growing an allocation and the next block is unavailable,
- * realloc should try expanding into the previous free block,
- * moving data with memmove instead of malloc+memcpy+free.
+ * When growing an allocation and the next block is unavailable, realloc should
+ * try expanding into the previous free block, moving data with memmove instead
+ * of malloc+memcpy+free.
  */
 static void realloc_backward_test(tlsf_t *t)
 {
     printf("Realloc backward expansion test: ");
     fflush(stdout);
 
-    /* Test 1: Simple backward expansion
-     * Allocate A, B, C in sequence, free A, then grow B.
-     * B should expand backward into A's space.
+    /* Test 1: Simple backward expansion Allocate A, B, C in sequence, free A,
+     * then grow B. B should expand backward into A's space.
      */
     {
         const size_t size_a = 512;
@@ -413,8 +408,8 @@ static void realloc_backward_test(tlsf_t *t)
         tlsf_free(t, a);
         tlsf_check(t);
 
-        /* Grow B beyond its current size. Next block (C) is used,
-         * so backward expansion should be triggered.
+        /* Grow B beyond its current size. Next block (C) is used, so backward
+         * expansion should be triggered.
          */
         size_t new_size = size_a + size_b - 32; /* Fits in prev+current */
         void *new_b = tlsf_realloc(t, b, new_size);
@@ -436,9 +431,8 @@ static void realloc_backward_test(tlsf_t *t)
     printf(".");
     fflush(stdout);
 
-    /* Test 2: Backward + forward expansion (both neighbors free)
-     * Allocate A, B, C, D, free A and C, then grow B.
-     * B should merge with both A and C.
+    /* Test 2: Backward + forward expansion (both neighbors free) Allocate A, B,
+     * C, D, free A and C, then grow B. B should merge with both A and C.
      */
     {
         const size_t size_a = 512;
@@ -481,8 +475,8 @@ static void realloc_backward_test(tlsf_t *t)
     printf(".");
     fflush(stdout);
 
-    /* Test 3: Verify forward expansion is still preferred over backward
-     * (no data movement needed for forward expansion)
+    /* Test 3: Verify forward expansion is still preferred over backward (no
+     * data movement needed for forward expansion)
      */
     {
         const size_t size_a = 256;
@@ -562,8 +556,8 @@ static void realloc_backward_test(tlsf_t *t)
     printf(". done\n");
 }
 
-/* Test static (fixed-size) pool initialization and usage.
- * Exercises tlsf_pool_init() without requiring tlsf_resize().
+/* Test static (fixed-size) pool initialization and usage. Exercises
+ * tlsf_pool_init() without requiring tlsf_resize().
  */
 static void static_pool_test(void)
 {
@@ -749,8 +743,8 @@ static void static_pool_test(void)
     printf(". done\n");
 }
 
-/* Test zero-size and alignment edge cases.
- * Validates consistent behavior between tlsf_malloc and tlsf_aalloc.
+/* Test zero-size and alignment edge cases. Validates consistent behavior
+ * between tlsf_malloc and tlsf_aalloc.
  */
 static void zero_size_align_test(tlsf_t *t)
 {
@@ -771,8 +765,8 @@ static void zero_size_align_test(tlsf_t *t)
     printf(".");
     fflush(stdout);
 
-    /* Test 2: tlsf_aalloc(t, align, 0) returns a valid aligned pointer
-     * (was returning NULL before the fix)
+    /* Test 2: tlsf_aalloc(t, align, 0) returns a valid aligned pointer (was
+     * returning NULL before the fix)
      */
     {
         size_t aligns[] = {8, 16, 32, 64, 128, 256, 512, 1024, 4096};
@@ -972,9 +966,9 @@ int main(void)
 #else
     PAGE = (size_t) sysconf(_SC_PAGESIZE);
 #endif
-    /* Virtual address space reservation for testing.
-     * 64-bit: 1GB is sufficient and safe
-     * 32-bit: 128MB to avoid VA space exhaustion (user space is 2-3GB)
+
+    /* Virtual address space reservation for testing. 64-bit: 1GB is sufficient
+     * and safe 32-bit: 128MB to avoid VA space exhaustion (user space is 2-3GB)
      */
 #if _TLSF_SIZE_WIDTH == 64 || defined(__LP64__) || defined(_LP64)
     MAX_PAGES = ((size_t) 1 << 30) / PAGE; /* 1 GB */

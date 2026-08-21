@@ -4,11 +4,10 @@
  * "LICENSE" for information on usage and redistribution of this file.
  */
 
-/*
- * WCET (Worst-Case Execution Time) measurement for TLSF allocator.
+/* WCET (Worst-Case Execution Time) measurement for TLSF allocator.
  *
- * Measures per-operation latency under pathological scenarios to bound
- * the O(1) constant of TLSF's malloc and free operations.
+ * Measures per-operation latency under pathological scenarios to bound the O(1)
+ * constant of TLSF's malloc and free operations.
  *
  * Two worst-case scenarios (from TLSF-WCET):
  *   malloc: Small request from a pool with one huge free block.
@@ -21,8 +20,8 @@
  *   free:   No merge possible (used neighbors on both sides).
  *
  * Timing: rdtsc on x86-64, cntvct_el0 on ARM64, clock_gettime fallback.
- * Addresses TLSF-WCET limitations: clock() resolution, single-size
- * testing, no optimization-level variation.
+ * Addresses TLSF-WCET limitations: clock() resolution, single-size testing, no
+ * optimization-level variation.
  */
 
 #include <assert.h>
@@ -43,30 +42,28 @@
 
 #include "tlsf.h"
 
-/* --- Timing primitives --- */
+/* Timing primitives */
 
 typedef uint64_t tick_t;
 
-/*
- * Platform-specific cycle/tick counter.
+/* Platform-specific cycle/tick counter.
  *
  * x86-64: lfence + rdtsc gives cycle-accurate measurement with ~5 cycle
- * overhead.  lfence serializes preceding instructions without the full
- * cost of cpuid (~100 cycles).
+ * overhead. lfence serializes preceding instructions without the full cost of
+ * cpuid (~100 cycles).
  *
- * ARM64 (Linux): cntvct_el0 reads the generic timer counter.  Not true
- * CPU cycles, but a fixed-frequency counter suitable for latency
- * measurement.  isb ensures instruction stream synchronization.
- * Resolution depends on counter frequency (typically 25-100 MHz,
- * i.e. 10-40 ns granularity); subtle regressions may be invisible.
- * For cycle-accurate ARM measurements, enable userspace PMU access
- * to PMCCNTR_EL0 via perf_event or a kernel module.
+ * ARM64 (Linux): cntvct_el0 reads the generic timer counter. Not true CPU
+ * cycles, but a fixed-frequency counter suitable for latency measurement. isb
+ * ensures instruction stream synchronization. Resolution depends on counter
+ * frequency (typically 25-100 MHz, i.e. 10-40 ns granularity); subtle
+ * regressions may be invisible. For cycle-accurate ARM measurements, enable
+ * userspace PMU access to PMCCNTR_EL0 via perf_event or a kernel module.
  *
- * macOS: mach_absolute_time() with timebase conversion to nanoseconds.
- * Works on both Intel and Apple Silicon.
+ * macOS: mach_absolute_time() with timebase conversion to nanoseconds. Works on
+ * both Intel and Apple Silicon.
  *
- * Fallback: clock_gettime(CLOCK_MONOTONIC) gives nanosecond resolution,
- * a major improvement over TLSF-WCET's clock() (millisecond resolution).
+ * Fallback: clock_gettime(CLOCK_MONOTONIC) gives nanosecond resolution, a major
+ * improvement over TLSF-WCET's clock() (millisecond resolution).
  */
 #if defined(__x86_64__) || defined(__i386__)
 #define TICK_UNIT "cycles"
@@ -118,7 +115,7 @@ static inline tick_t read_tick(void)
 }
 #endif
 
-/* --- Statistics --- */
+/* Statistics */
 
 static int cmp_tick(const void *a, const void *b)
 {
@@ -173,18 +170,17 @@ static void compute_latency_stats(tick_t *samples, size_t n, latency_stats_t *s)
     s->stddev = n > 1 ? sqrt(var / (double) (n - 1)) : 0;
 }
 
-/* --- Cache control ---
+/* Cache control
  *
  * Cold-cache mode (-C): stride through a large buffer before each timed
  * operation to evict the tlsf_t control structure (~7 KB) and heap block
- * headers from L1/L2 cache.  This simulates the real-time worst case
- * where an allocation happens in an interrupt handler after a long idle
- * period.
+ * headers from L1/L2 cache. This simulates the real-time worst case where an
+ * allocation happens in an interrupt handler after a long idle period.
  *
- * Without -C, measurements reflect hot-cache behavior: the bitmap and
- * block headers sit in L1/L2 from the preceding setup code.  Hot-cache
- * numbers isolate algorithmic cost; cold-cache numbers bound the true
- * system-level WCET including memory latency.
+ * Without -C, measurements reflect hot-cache behavior: the bitmap and block
+ * headers sit in L1/L2 from the preceding setup code. Hot-cache numbers isolate
+ * algorithmic cost; cold-cache numbers bound the true system-level WCET
+ * including memory latency.
  */
 
 #define THRASH_SIZE (64U << 20) /* 64 MB -- exceeds typical L2 and most L3 */
@@ -195,32 +191,32 @@ static void cache_thrash(void)
 {
     if (!thrash_buf)
         return;
-    /* Read every cache line to evict pool data from cache hierarchy.
-     * Volatile pointer prevents compiler from optimizing away reads.
+
+    /* Read every cache line to evict pool data from cache hierarchy. Volatile
+     * pointer prevents compiler from optimizing away reads.
      */
     volatile const char *p = (volatile const char *) thrash_buf;
     for (size_t i = 0; i < THRASH_SIZE; i += 64)
         (void) p[i];
 }
 
-/* --- Scenario measurement functions ---
+/* Scenario measurement functions
  *
- * Each function sets up the pathological heap state, then measures the
- * target operation in a tight loop.  The pool is re-initialized per
- * iteration to ensure consistent starting conditions.
+ * Each function sets up the pathological heap state, then measures the target
+ * operation in a tight loop. The pool is re-initialized per iteration to ensure
+ * consistent starting conditions.
  *
- * Static pools (tlsf_pool_init) are used exclusively: no tlsf_resize
- * callback, no arena growth during measurement.
+ * Static pools (tlsf_pool_init) are used exclusively: no tlsf_resize callback,
+ * no arena growth during measurement.
  */
 
-/*
- * malloc worst case: Pool has a single huge free block, request is small.
+/* malloc worst case: Pool has a single huge free block, request is small.
  *
- * This forces the longest bitmap search path: the requested size maps
- * to a low FL/SL bin, but the only available block is in a high FL bin.
- * block_find_suitable must scan the SL bitmap (all zeros), then the FL
- * bitmap to find the distant block.  After extraction, the block is
- * split and the remainder is inserted into its bin.
+ * This forces the longest bitmap search path: the requested size maps to a low
+ * FL/SL bin, but the only available block is in a high FL bin.
+ * block_find_suitable must scan the SL bitmap (all zeros), then the FL bitmap
+ * to find the distant block. After extraction, the block is split and the
+ * remainder is inserted into its bin.
  *
  * Full path: adjust_size -> round_block_size -> mapping ->
  *   block_find_suitable (full bitmap search) -> remove_free_block ->
@@ -256,14 +252,13 @@ static void measure_malloc_worst(char *pool,
     }
 }
 
-/*
- * malloc best case: A block exists in the exact bin for the request.
+/* malloc best case: A block exists in the exact bin for the request.
  *
  * Setup: allocate a block of the target size, then allocate a separator
- * (prevents coalescing), then free the target block.  The freed block
- * lands in its size-class bin.  The subsequent measured malloc hits the
- * exact bin immediately -- no bitmap scanning beyond the target SL.
- * The block size matches the bin's minimum, so no split occurs.
+ * (prevents coalescing), then free the target block. The freed block lands in
+ * its size-class bin. The subsequent measured malloc hits the exact bin
+ * immediately -- no bitmap scanning beyond the target SL. The block size
+ * matches the bin's minimum, so no split occurs.
  *
  * Short path: adjust_size -> round_block_size -> mapping ->
  *   block_find_suitable (immediate hit) -> remove_free_block ->
@@ -308,21 +303,19 @@ static void measure_malloc_best(char *pool,
     }
 }
 
-/*
- * Allocate three adjacent blocks of the requested size from a static pool.
+/* Allocate three adjacent blocks of the requested size from a static pool.
  *
  * TLSF's block_find_free updates the request size to mapping_size(found_bin),
- * which can be far larger than the original request when the pool has a
- * single huge free block (e.g., requesting 1024 from a 4MB pool allocates
- * ~4MB due to bin-minimum inflation).  This prevents multiple allocations
- * from a fresh pool.
+ * which can be far larger than the original request when the pool has a single
+ * huge free block (e.g., requesting 1024 from a 4MB pool allocates ~4MB due to
+ * bin-minimum inflation). This prevents multiple allocations from a fresh pool.
  *
  * Workaround: allocate each block at the inflated size, then immediately
- * realloc down to the target size.  Realloc's trim path (block_rtrim_used)
- * splits the oversized block, returning the excess to the free list.
- * The excess merges with any adjacent free block, making space for the
- * next allocation.  After three malloc+realloc cycles, we have three
- * adjacent blocks of the correct size.
+ * realloc down to the target size. Realloc's trim path (block_rtrim_used)
+ * splits the oversized block, returning the excess to the free list. The excess
+ * merges with any adjacent free block, making space for the next allocation.
+ * After three malloc+realloc cycles, we have three adjacent blocks of the
+ * correct size.
  */
 static void alloc_three_blocks(tlsf_t *t,
                                size_t alloc_size,
@@ -346,13 +339,11 @@ static void alloc_three_blocks(tlsf_t *t,
     assert(*c);
 }
 
-/*
- * free worst case: Block sandwiched between two free neighbors.
+/* free worst case: Block sandwiched between two free neighbors.
  *
- * Setup: allocate three adjacent blocks A, B, C using the
- * alloc+realloc trick (see alloc_three_blocks), then free A
- * (left neighbor becomes free) and free C (right neighbor merges
- * with the pool remainder, creating a large free block).
+ * Setup: allocate three adjacent blocks A, B, C using the alloc+realloc trick
+ * (see alloc_three_blocks), then free A (left neighbor becomes free) and free C
+ * (right neighbor merges with the pool remainder, creating a large free block).
  * Now B has a free block on each side.
  *
  * Freeing B triggers the maximum-work path:
@@ -395,13 +386,12 @@ static void measure_free_worst(char *pool,
     }
 }
 
-/*
- * free best case: Block between two used neighbors (no merge).
+/* free best case: Block between two used neighbors (no merge).
  *
- * Setup: allocate three adjacent blocks A, B, C (using the
- * alloc+realloc trick).  All remain allocated.  Freeing B finds used
- * blocks on both sides, so block_merge_prev and block_merge_next both
- * skip.  Only a single list insertion occurs.
+ * Setup: allocate three adjacent blocks A, B, C (using the alloc+realloc
+ * trick). All remain allocated. Freeing B finds used blocks on both sides, so
+ * block_merge_prev and block_merge_next both skip. Only a single list insertion
+ * occurs.
  *
  * Minimal path: block_from_payload -> block_set_free -> block_link_next
  *   -> block_merge_prev (skip) -> block_merge_next (skip) ->
@@ -436,7 +426,7 @@ static void measure_free_best(char *pool,
     }
 }
 
-/* --- Configuration --- */
+/* Configuration */
 
 static const size_t test_sizes[] = {16, 64, 256, 1024, 4096};
 #define NUM_SIZES (sizeof(test_sizes) / sizeof(test_sizes[0]))
@@ -458,7 +448,7 @@ static const scenario_t scenarios[] = {
 };
 #define NUM_SCENARIOS (sizeof(scenarios) / sizeof(scenarios[0]))
 
-/* --- Argument parsing --- */
+/* Argument parsing */
 
 static void usage(const char *prog)
 {
@@ -502,7 +492,7 @@ static size_t parse_size_arg(const char *arg, const char *name)
     return (size_t) val;
 }
 
-/* --- Main --- */
+/* Main */
 
 #define DEFAULT_POOL_SIZE ((size_t) 4 << 20) /* 4 MB */
 
@@ -620,8 +610,9 @@ int main(int argc, char **argv)
             scenarios[sc].measure(pool, pool_size, sz, iterations, warmup,
                                   samples);
 
-            /* Write raw samples before sorting (compute_latency_stats sorts
-             * in place) */
+            /* Write raw samples before sorting (compute_latency_stats sorts in
+             * place)
+             */
             if (raw_fp) {
                 for (size_t i = 0; i < iterations; i++)
                     fprintf(raw_fp, "%s,%zu,%s,%" PRIu64 "\n",
@@ -659,8 +650,8 @@ int main(int argc, char **argv)
             size_t sz = test_sizes[si];
             latency_stats_t mw, mb, fw, fb;
 
-            /* Re-measure with minimal iterations for ratio computation.
-             * The samples array was already overwritten, so reuse it.
+            /* Re-measure with minimal iterations for ratio computation. The
+             * samples array was already overwritten, so reuse it.
              */
             scenarios[0].measure(pool, pool_size, sz, iterations, warmup,
                                  samples);
