@@ -98,7 +98,7 @@ extern "C" {
 #include <windows.h>
 #endif
 
-#if defined (USE_C11_THREADS)
+#if defined(USE_C11_THREADS)
 #define TLSF_LOCK_T mtx_t
 #define TLSF_LOCK_INIT(l) mtx_init((l), mtx_plain)
 #define TLSF_LOCK_DESTROY(l) mtx_destroy((l))
@@ -112,7 +112,7 @@ extern "C" {
 #define TLSF_LOCK_ACQUIRE(l) EnterCriticalSection((l))
 #define TLSF_LOCK_RELEASE(l) LeaveCriticalSection((l))
 #define TLSF_LOCK_TRY(l) (TryEnterCriticalSection((l)) != 0)
-#elif defined (TLSF_THREAD_POSIX)
+#elif defined(TLSF_THREAD_POSIX)
 #define TLSF_LOCK_T pthread_mutex_t
 #define TLSF_LOCK_INIT(l) pthread_mutex_init((l), NULL)
 #define TLSF_LOCK_DESTROY(l) pthread_mutex_destroy((l))
