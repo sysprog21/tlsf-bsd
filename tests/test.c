@@ -10,9 +10,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+#include <windows.h>
+#include <stddef.h>
+#include <time.h>
+#else
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#endif
+
 
 #include "tlsf.h"
 
@@ -21,6 +28,60 @@ static size_t MAX_PAGES;
 static size_t curr_pages = 0;
 static void *start_addr = 0;
 
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+size_t get_page_size(void)
+{
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (size_t)si.dwPageSize;
+}
+
+void* tlsf_resize(tlsf_t* t, size_t req_size)
+{
+    (void)t;
+
+    // This is analogue mmap with flag MAP_NORESERVE to VirtualAlloc with MEM_RESERVE
+    if (!start_addr) {
+        start_addr = VirtualAlloc(
+            NULL,
+            MAX_PAGES * PAGE,
+            MEM_RESERVE,    // Only reserve address space 
+            PAGE_READWRITE       // Rights for read and write 
+        );
+        if (!start_addr) return NULL;
+    }
+
+    size_t req_pages = (req_size + PAGE - 1) / PAGE;
+    if (req_pages > MAX_PAGES)
+        return NULL;
+
+    if (req_pages != curr_pages) {
+        if (req_pages < curr_pages) {
+            // Analogue for madvise(..., MADV_DONTNEED) to VirtualFree with MEM_DECOMMIT
+            // Free physical memory (commit), with reserved addresses
+            VirtualFree(
+                (char*)start_addr + PAGE * req_pages,
+                (size_t)(curr_pages - req_pages) * PAGE,
+                MEM_DECOMMIT     // physical pages to zero
+            );
+        }
+        else {
+            // Commit reserved memory            
+            void* commit_ptr = VirtualAlloc(
+                start_addr,      // base address is the same
+                req_pages * PAGE,
+                MEM_COMMIT,      // Commit new pages
+                PAGE_READWRITE
+            );
+            if (!commit_ptr) return NULL;
+        }
+
+        curr_pages = req_pages;
+    }
+
+    return start_addr;
+}
+#else
 void *tlsf_resize(tlsf_t *t, size_t req_size)
 {
     (void) t;
@@ -42,6 +103,7 @@ void *tlsf_resize(tlsf_t *t, size_t req_size)
 
     return start_addr;
 }
+#endif
 
 static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 {
@@ -125,16 +187,28 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
+#if defined(_MSC_VER)
+static int msvc_large_rand(void)
+{
+    // 1 billion random number for MSVC
+    return (rand() << 15) | rand();
+}
+#endif
+
 static void random_sizes_test(tlsf_t *t)
 {
-    const size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 1024 * 1024};
+    const size_t sizes[] = { 16, 32, 64, 128, 256, 512, 1024, 1024 * 1024 };
 
     printf("Random allocation test: ");
     for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
         unsigned n = 1024;
 
         while (n--)
-            random_test(t, sizes[i], (size_t) rand() % sizes[i] + 1);
+#if defined(_MSC_VER)
+            random_test(t, sizes[i], (size_t)msvc_large_rand() % sizes[i] + 1);
+#else
+            random_test(t, sizes[i], (size_t)rand() % sizes[i] + 1);
+#endif
         printf(".");
         fflush(stdout);
     }
@@ -168,7 +242,7 @@ static void large_size_test(tlsf_t *t)
     /* Cap test size to fit within test pool limits.
      * 64-bit: up to 256MB, 32-bit: up to 32MB (pool is 128MB)
      */
-#if __SIZE_WIDTH__ == 64 || defined(__LP64__) || defined(_LP64)
+#if _TLSF_SIZE_WIDTH == 64 || defined(__LP64__) || defined(_LP64)
     size_t max_test = (size_t) 1 << 28; /* 256 MB */
 #else
     size_t max_test = (size_t) 1 << 25; /* 32 MB */
@@ -179,7 +253,7 @@ static void large_size_test(tlsf_t *t)
     size_t s = 1;
     while (s <= max_test) {
         large_alloc(t, s);
-        s *= 2;
+        s *= 2;        
     }
     printf(".");
     fflush(stdout);
@@ -893,12 +967,16 @@ static void pool_reset_test(void)
 
 int main(void)
 {
+#ifdef _WIN32
+    PAGE = get_page_size();
+#else
     PAGE = (size_t) sysconf(_SC_PAGESIZE);
+#endif
     /* Virtual address space reservation for testing.
      * 64-bit: 1GB is sufficient and safe
      * 32-bit: 128MB to avoid VA space exhaustion (user space is 2-3GB)
      */
-#if __SIZE_WIDTH__ == 64 || defined(__LP64__) || defined(_LP64)
+#if _TLSF_SIZE_WIDTH == 64 || defined(__LP64__) || defined(_LP64)
     MAX_PAGES = ((size_t) 1 << 30) / PAGE; /* 1 GB */
 #else
     MAX_PAGES = ((size_t) 128 << 20) / PAGE; /* 128 MB */

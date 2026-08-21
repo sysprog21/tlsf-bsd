@@ -74,7 +74,28 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CFLAGS: ${{ matrix.cflags }}
-
+  
+  build-windows-msvc:
+    needs: coding-style
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Compile Single-Threaded TLSF with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\test.c /Fe:test_tlsf.exe
+      - name: Run Single-Threaded Tests
+        run: |
+          .\test_tlsf.exe
+      - name: Compile Multi-Threaded TLSF with MSVC (C11)
+        run: |
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf.c src\tlsf_thread.c tests\test_thread.c /Fe:test_thread.exe
+      - name: Run Multi-Threaded Tests
+        run: |
+          .\test_thread.exe
+  
   wcet:
     needs: [coding-style, build-and-test]
     runs-on: ${{ matrix.runner }}

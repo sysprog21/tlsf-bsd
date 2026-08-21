@@ -25,6 +25,26 @@ extern "C" {
  */
 #define _TLSF_SL_COUNT 32
 
+#ifndef _TLSF_SIZE_WIDTH
+#if defined(_MSC_VER)
+#if defined(_WIN64)
+#define _TLSF_SIZE_WIDTH 64
+#else
+#define _TLSF_SIZE_WIDTH 32
+#endif
+#elif defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) ||  defined(__clang__)
+#define _TLSF_SIZE_WIDTH __SIZE_WIDTH__
+#else
+#if INTPTR_MAX == INT64_MAX
+#define _TLSF_SIZE_WIDTH 64
+#elif INTPTR_MAX == INT32_MAX
+#define _TLSF_SIZE_WIDTH 32
+#else
+#error No support for non 32 or 64 bit systems
+#endif
+#endif
+#endif
+
 /*
  * Configurable maximum pool size: define TLSF_MAX_POOL_BITS to clamp
  * the first-level index, reducing the tlsf_t control structure size.
@@ -34,7 +54,7 @@ extern "C" {
 #ifdef TLSF_MAX_POOL_BITS
 #define _TLSF_FL_MAX TLSF_MAX_POOL_BITS
 #else
-#if __SIZE_WIDTH__ == 64
+#if _TLSF_SIZE_WIDTH == 64
 #define _TLSF_FL_MAX 39
 #else
 #define _TLSF_FL_MAX 31
@@ -42,7 +62,7 @@ extern "C" {
 #endif
 
 /* FL_SHIFT = log2(SL_COUNT) + log2(ALIGN_SIZE) */
-#if __SIZE_WIDTH__ == 64
+#if _TLSF_SIZE_WIDTH == 64
 #define _TLSF_FL_SHIFT 8
 #else
 #define _TLSF_FL_SHIFT 7
@@ -50,6 +70,14 @@ extern "C" {
 #define _TLSF_FL_COUNT (_TLSF_FL_MAX - _TLSF_FL_SHIFT + 1)
 #define TLSF_MAX_SIZE (((size_t) 1 << (_TLSF_FL_MAX - 1)) - sizeof(size_t))
 #define TLSF_INIT ((tlsf_t) {.size = 0})
+
+/* TLSF_INIT_STATIC is need to be used instead of TLSF_INIT for initializing
+static objects for cross platform compatibility */
+#if defined(_MSC_VER)
+#define TLSF_INIT_STATIC { .size = 0 }
+#else
+#define TLSF_INIT_STATIC ((tlsf_t) {.size = 0})
+#endif
 
 /*
  * Block header structure.

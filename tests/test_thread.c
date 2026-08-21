@@ -11,10 +11,15 @@
  */
 
 #include <assert.h>
-#include <pthread.h>
+//#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#if defined(_MSC_VER)
+#define _CRT_RAND_S
 #include <stdlib.h>
+#else
+#include <stdlib.h>
+#endif
 #include <string.h>
 
 #include "tlsf_thread.h"
@@ -29,8 +34,35 @@
 #define MAX_ALLOCS 128
 #define MAX_ALLOC_SIZE 2048
 
-static char pool[POOL_SIZE] __attribute__((aligned(16)));
+TLSF_MSVC_ALIGN(16) static char pool[POOL_SIZE] TLSF_GCC_ALIGN(16);
 static tlsf_thread_t ts;
+
+#if defined(USE_C11_THREADS)
+#define TLSF_THREAD_T thrd_t
+#define TLSF_CREATE_THREAD(thrd, func, arg) thrd_create(thrd, func, arg)
+#define TLSF_JOIN_THREAD(thrd) thrd_join((thrd), NULL)
+#define TLSF_THREAD_CONVENTION int
+#define TLSF_THREAD_RETURN 0
+#elif defined(TLSF_THREAD_POSIX)
+#define TLSF_THREAD_T pthread_t
+#define TLSF_CREATE_THREAD(thrd, func, arg) pthread_create(thrd, NULL, func, arg)
+#define TLSF_JOIN_THREAD(thrd) pthread_join((thrd), NULL)
+#define TLSF_THREAD_CONVENTION void*
+#define TLSF_THREAD_RETURN NULL
+#elif defined(TLSF_THREAD_WIN)
+#define TLSF_THREAD_T HANDLE
+#define TLSF_CREATE_THREAD(thrd, func, arg) \
+    ((*(thrd) = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)(func), (arg), 0, NULL)) != NULL ? 0 : -1)
+#define TLSF_JOIN_THREAD(thrd) (WaitForSingleObject((thrd), INFINITE), CloseHandle((thrd)), 0)
+#define TLSF_THREAD_CONVENTION DWORD WINAPI
+#define TLSF_THREAD_RETURN 0
+#endif
+
+#if defined(_MSC_VER)
+#define TLSF_RAND(x) (rand_s((x)), (unsigned)*(x))
+#else
+#define TLSF_RAND(x) (rand_r(x))
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Per-thread work                                                     */
@@ -44,7 +76,7 @@ typedef struct {
     int realloc_count; /* total reallocs */
 } thread_result_t;
 
-static void *thread_func(void *arg)
+static TLSF_THREAD_CONVENTION thread_func(void *arg)
 {
     thread_result_t *res = (thread_result_t *) arg;
     void *ptrs[MAX_ALLOCS];
@@ -55,13 +87,13 @@ static void *thread_func(void *arg)
     memset(ptrs, 0, sizeof(ptrs));
 
     for (int op = 0; op < OPS_PER_THREAD; op++) {
-        int action = (int) (rand_r(&seed) % 4);
+        int action = (int) (TLSF_RAND(&seed) % 4);
 
         switch (action) {
         case 0: /* malloc */
         case 1:
             if (count < MAX_ALLOCS) {
-                size_t sz = (size_t) (rand_r(&seed) % MAX_ALLOC_SIZE) + 1;
+                size_t sz = (size_t) (TLSF_RAND(&seed) % MAX_ALLOC_SIZE) + 1;
                 void *p = tlsf_thread_malloc(&ts, sz);
                 if (p) {
                     /* Fill with per-thread pattern for integrity check */
@@ -76,7 +108,7 @@ static void *thread_func(void *arg)
 
         case 2: /* free */
             if (count > 0) {
-                int idx = (int) ((unsigned) rand_r(&seed) % (unsigned) count);
+                int idx = (int) ((unsigned) TLSF_RAND(&seed) % (unsigned) count);
                 /* Verify fill pattern before freeing */
                 uint8_t *data = (uint8_t *) ptrs[idx];
                 for (size_t i = 0; i < sizes[idx]; i++) {
@@ -96,9 +128,9 @@ static void *thread_func(void *arg)
 
         case 3: /* realloc */
             if (count > 0) {
-                int idx = (int) ((unsigned) rand_r(&seed) % (unsigned) count);
+                int idx = (int) ((unsigned) TLSF_RAND(&seed) % (unsigned) count);
                 size_t old_sz = sizes[idx];
-                size_t new_sz = (size_t) (rand_r(&seed) % MAX_ALLOC_SIZE) + 1;
+                size_t new_sz = (size_t) (TLSF_RAND(&seed) % MAX_ALLOC_SIZE) + 1;
 
                 void *p = tlsf_thread_realloc(&ts, ptrs[idx], new_sz);
                 if (p) {
@@ -134,7 +166,7 @@ static void *thread_func(void *arg)
         tlsf_thread_free(&ts, ptrs[i]);
     }
 
-    return NULL;
+    return TLSF_THREAD_RETURN;
 }
 
 /* ------------------------------------------------------------------ */
@@ -152,7 +184,7 @@ static void stress_test(void)
     printf("(%d arenas, %zu usable) ", ts.count, usable);
     fflush(stdout);
 
-    pthread_t threads[NUM_THREADS];
+    TLSF_THREAD_T threads[NUM_THREADS];
     thread_result_t results[NUM_THREADS];
 
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -161,13 +193,13 @@ static void stress_test(void)
         results[i].alloc_count = 0;
         results[i].free_count = 0;
         results[i].realloc_count = 0;
-        pthread_create(&threads[i], NULL, thread_func, &results[i]);
+        TLSF_CREATE_THREAD(&threads[i], thread_func, &results[i]);
     }
 
     int total_errors = 0;
     int total_allocs = 0, total_frees = 0, total_reallocs = 0;
     for (int i = 0; i < NUM_THREADS; i++) {
-        pthread_join(threads[i], NULL);
+        TLSF_JOIN_THREAD(threads[i]);
         total_errors += results[i].errors;
         total_allocs += results[i].alloc_count;
         total_frees += results[i].free_count;
@@ -194,18 +226,18 @@ static void stress_test(void)
 /* Test: aligned allocation under contention                           */
 /* ------------------------------------------------------------------ */
 
-static void *aligned_thread_func(void *arg)
+static TLSF_THREAD_CONVENTION aligned_thread_func(void *arg)
 {
     int id = *(int *) arg;
     unsigned seed = (unsigned) id * 0xDEADBEEF + 7;
 
     for (int op = 0; op < 5000; op++) {
         /* Alignment: power of two from 8 to 4096 */
-        unsigned shift = (unsigned) (rand_r(&seed) % 10) + 3; /* 8 to 8192 */
+        unsigned shift = (unsigned) (TLSF_RAND(&seed) % 10) + 3; /* 8 to 8192 */
         size_t align = (size_t) 1 << shift;
         if (align > 4096)
             align = 4096;
-        size_t sz = (size_t) (rand_r(&seed) % 512) + 1;
+        size_t sz = (size_t) (TLSF_RAND(&seed) % 512) + 1;
 
         void *p = tlsf_thread_aalloc(&ts, align, sz);
         if (p) {
@@ -214,7 +246,7 @@ static void *aligned_thread_func(void *arg)
             tlsf_thread_free(&ts, p);
         }
     }
-    return NULL;
+    return TLSF_THREAD_RETURN;
 }
 
 static void aligned_test(void)
@@ -225,14 +257,14 @@ static void aligned_test(void)
     size_t usable = tlsf_thread_init(&ts, pool, sizeof(pool));
     assert(usable > 0);
 
-    pthread_t threads[NUM_THREADS];
+    TLSF_THREAD_T threads[NUM_THREADS];
     int ids[NUM_THREADS];
     for (int i = 0; i < NUM_THREADS; i++) {
         ids[i] = i;
-        pthread_create(&threads[i], NULL, aligned_thread_func, &ids[i]);
+        TLSF_CREATE_THREAD(&threads[i], aligned_thread_func, &ids[i]);
     }
     for (int i = 0; i < NUM_THREADS; i++)
-        pthread_join(threads[i], NULL);
+        TLSF_JOIN_THREAD(threads[i]);
 
     tlsf_thread_check(&ts);
 
