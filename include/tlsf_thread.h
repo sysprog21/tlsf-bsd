@@ -151,8 +151,12 @@ extern "C" {
 #endif
 #endif
 
-#endif
+#endif /* TLSF_LOCK_T */
 
+/* Fallback thread hint for custom locks without a custom hint. */
+#ifndef TLSF_THREAD_HINT
+#define TLSF_THREAD_HINT() 0U
+#endif
 
 #if defined(_MSC_VER)
 #define TLSF_MSVC_ALIGN(x) __declspec(align(x))
