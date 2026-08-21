@@ -98,7 +98,14 @@ extern "C" {
 #include <windows.h>
 #endif
 
-#if defined(TLSF_THREAD_WIN)
+#if defined (USE_C11_THREADS)
+#define TLSF_LOCK_T mtx_t
+#define TLSF_LOCK_INIT(l) mtx_init((l), mtx_plain)
+#define TLSF_LOCK_DESTROY(l) mtx_destroy((l))
+#define TLSF_LOCK_ACQUIRE(l) mtx_lock((l))
+#define TLSF_LOCK_RELEASE(l) mtx_unlock((l))
+#define TLSF_LOCK_TRY(l) (mtx_trylock((l)) == thrd_success)
+#elif defined(TLSF_THREAD_WIN)
 #define TLSF_LOCK_T CRITICAL_SECTION
 #define TLSF_LOCK_INIT(l) (InitializeCriticalSection((l)), 0)
 #define TLSF_LOCK_DESTROY(l) DeleteCriticalSection((l))
@@ -112,13 +119,6 @@ extern "C" {
 #define TLSF_LOCK_ACQUIRE(l) pthread_mutex_lock((l))
 #define TLSF_LOCK_RELEASE(l) pthread_mutex_unlock((l))
 #define TLSF_LOCK_TRY(l) (pthread_mutex_trylock((l)) == 0)
-#elif defined (USE_C11_THREADS)
-#define TLSF_LOCK_T mtx_t
-#define TLSF_LOCK_INIT(l) mtx_init((l), mtx_plain)
-#define TLSF_LOCK_DESTROY(l) mtx_destroy((l))
-#define TLSF_LOCK_ACQUIRE(l) mtx_lock((l))
-#define TLSF_LOCK_RELEASE(l) mtx_unlock((l))
-#define TLSF_LOCK_TRY(l) (mtx_trylock((l)) == thrd_success)
 #endif
 
 /* Fold upper bits into lower 32 to retain entropy on 64-bit systems. */
