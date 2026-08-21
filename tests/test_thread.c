@@ -41,15 +41,22 @@ static tlsf_thread_t ts;
 #define TLSF_THREAD_T thrd_t
 #define TLSF_CREATE_THREAD(thrd, func, arg) thrd_create(thrd, func, arg)
 #define TLSF_JOIN_THREAD(thrd) thrd_join((thrd), NULL)
+#define TLSF_JOIN_THREAD(thrd) thrd_join((thrd), NULL)
+#define TLSF_THREAD_CONVENTION int
+#define TLSF_THREAD_RETURN 0
 #elif defined(TLSF_THREAD_POSIX)
 #define TLSF_THREAD_T pthread_t
 #define TLSF_CREATE_THREAD(thrd, func, arg) pthread_create(thrd, NULL, func, arg)
 #define TLSF_JOIN_THREAD(thrd) pthread_join((thrd), NULL)
+#define TLSF_THREAD_CONVENTION void*
+#define TLSF_THREAD_RETURN NULL
 #elif defined(TLSF_THREAD_WIN)
 #define TLSF_THREAD_T HANDLE
 #define TLSF_CREATE_THREAD(thrd, func, arg) \
     ((*(thrd) = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)(func), (arg), 0, NULL)) != NULL ? 0 : -1)
 #define TLSF_JOIN_THREAD(thrd) (WaitForSingleObject((thrd), INFINITE), CloseHandle((thrd)), 0)
+#define TLSF_THREAD_CONVENTION DWORD WINAPI
+#define TLSF_THREAD_RETURN 0
 #endif
 
 #if defined(_MSC_VER)
@@ -70,7 +77,7 @@ typedef struct {
     int realloc_count; /* total reallocs */
 } thread_result_t;
 
-static void *thread_func(void *arg)
+static TLSF_THREAD_CONVENTION thread_func(void *arg)
 {
     thread_result_t *res = (thread_result_t *) arg;
     void *ptrs[MAX_ALLOCS];
@@ -160,7 +167,7 @@ static void *thread_func(void *arg)
         tlsf_thread_free(&ts, ptrs[i]);
     }
 
-    return NULL;
+    return TLSF_THREAD_RETURN;
 }
 
 /* ------------------------------------------------------------------ */
@@ -220,7 +227,7 @@ static void stress_test(void)
 /* Test: aligned allocation under contention                           */
 /* ------------------------------------------------------------------ */
 
-static void *aligned_thread_func(void *arg)
+static TLSF_THREAD_CONVENTION aligned_thread_func(void *arg)
 {
     int id = *(int *) arg;
     unsigned seed = (unsigned) id * 0xDEADBEEF + 7;
@@ -240,7 +247,7 @@ static void *aligned_thread_func(void *arg)
             tlsf_thread_free(&ts, p);
         }
     }
-    return NULL;
+    return TLSF_THREAD_RETURN;
 }
 
 static void aligned_test(void)
