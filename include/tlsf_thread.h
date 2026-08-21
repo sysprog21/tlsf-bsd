@@ -61,8 +61,9 @@ extern "C" {
  */
 
 #ifndef TLSF_LOCK_T
-
-#if defined(_MSC_VER)
+ /* It is possible to switch to C11 threads. For this define TLSF_C11_THREADS macro
+ in this header here */
+#if defined(_MSC_VER) && defined (TLSF_C11_THREADS)
 #if (_MSC_VER < 1935)
 #error Incompatible Visual C++ version. Requires VS 2022 17.5+ for C11 threads support.
 #elif !defined(__STDC_VERSION__) || (__STDC_VERSION__ < 201112L)
@@ -82,32 +83,42 @@ extern "C" {
 #define TLSF_THREAD_POSIX
 #endif
 
-/* It is possible to switch to C11 threads in non windows environment too. For this define TLSF_C11_THREADS macro
-before include this header */
 #if (defined(TLSF_THREAD_WIN) && defined(C11_THREADS_SUPPORT)) || (defined(TLSF_C11_THREADS) && defined(C11_THREADS_SUPPORT))
 #define USE_C11_THREADS 1
 #endif
 
 #if defined(USE_C11_THREADS)
 #include <threads.h>
-#elif
+#elif defined (TLSF_THREAD_POSIX)
 #include <pthread.h>
+#elif defined (TLSF_THREAD_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
-#if defined(USE_C11_THREADS)
-#define TLSF_LOCK_T mtx_t
-#define TLSF_LOCK_INIT(l) mtx_init((l), mtx_plain)
-#define TLSF_LOCK_DESTROY(l) mtx_destroy((l))
-#define TLSF_LOCK_ACQUIRE(l) mtx_lock((l))
-#define TLSF_LOCK_RELEASE(l) mtx_unlock((l))
-#define TLSF_LOCK_TRY(l) (mtx_trylock((l)) == thrd_success)
-#else
+#if defined(TLSF_THREAD_WIN)
+#define TLSF_LOCK_T CRITICAL_SECTION
+#define TLSF_LOCK_INIT(l) (InitializeCriticalSection((l)), 0)
+#define TLSF_LOCK_DESTROY(l) DeleteCriticalSection((l))
+#define TLSF_LOCK_ACQUIRE(l) EnterCriticalSection((l))
+#define TLSF_LOCK_RELEASE(l) LeaveCriticalSection((l))
+#define TLSF_LOCK_TRY(l) (TryEnterCriticalSection((l)) != 0)
+#elif defined (TLSF_THREAD_POSIX)
 #define TLSF_LOCK_T pthread_mutex_t
 #define TLSF_LOCK_INIT(l) pthread_mutex_init((l), NULL)
 #define TLSF_LOCK_DESTROY(l) pthread_mutex_destroy((l))
 #define TLSF_LOCK_ACQUIRE(l) pthread_mutex_lock((l))
 #define TLSF_LOCK_RELEASE(l) pthread_mutex_unlock((l))
 #define TLSF_LOCK_TRY(l) (pthread_mutex_trylock((l)) == 0)
+#elif defined (USE_C11_THREADS)
+#define TLSF_LOCK_T mtx_t
+#define TLSF_LOCK_INIT(l) mtx_init((l), mtx_plain)
+#define TLSF_LOCK_DESTROY(l) mtx_destroy((l))
+#define TLSF_LOCK_ACQUIRE(l) mtx_lock((l))
+#define TLSF_LOCK_RELEASE(l) mtx_unlock((l))
+#define TLSF_LOCK_TRY(l) (mtx_trylock((l)) == thrd_success)
 #endif
 
 /* Fold upper bits into lower 32 to retain entropy on 64-bit systems. */
@@ -136,6 +147,8 @@ before include this header */
 #define TLSF_THREAD_HINT()                    \
                 ((unsigned) ((uintptr_t) pthread_self() ^ \
                              ((uintptr_t) pthread_self() >> 16)))
+#elif defined(TLSF_THREAD_WIN)
+#define TLSF_THREAD_HINT() ((unsigned) GetCurrentThreadId())
 #else
 #define TLSF_THREAD_HINT() 0U
 #endif

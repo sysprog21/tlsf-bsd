@@ -40,11 +40,16 @@ static tlsf_thread_t ts;
 #if defined(USE_C11_THREADS)
 #define TLSF_THREAD_T thrd_t
 #define TLSF_CREATE_THREAD(thrd, func, arg) thrd_create(thrd, func, arg)
-#define TLSF_JOIN_THREAD thrd_join
-#else
+#define TLSF_JOIN_THREAD(thrd) thrd_join((thrd), NULL)
+#elif defined(TLSF_THREAD_POSIX)
 #define TLSF_THREAD_T pthread_t
 #define TLSF_CREATE_THREAD(thrd, func, arg) pthread_create(thrd, NULL, func, arg)
-#define TLSF_JOIN_THREAD pthread_join
+#define TLSF_JOIN_THREAD(thrd) pthread_join((thrd), NULL)
+#elif defined(TLSF_THREAD_WIN)
+#define TLSF_THREAD_T HANDLE
+#define TLSF_CREATE_THREAD(thrd, func, arg) \
+    ((*(thrd) = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)(func), (arg), 0, NULL)) != NULL ? 0 : -1)
+#define TLSF_JOIN_THREAD(thrd) (WaitForSingleObject((thrd), INFINITE), CloseHandle((thrd)), 0)
 #endif
 
 #if defined(_MSC_VER)
@@ -188,7 +193,7 @@ static void stress_test(void)
     int total_errors = 0;
     int total_allocs = 0, total_frees = 0, total_reallocs = 0;
     for (int i = 0; i < NUM_THREADS; i++) {
-        TLSF_JOIN_THREAD(threads[i], NULL);
+        TLSF_JOIN_THREAD(threads[i]);
         total_errors += results[i].errors;
         total_allocs += results[i].alloc_count;
         total_frees += results[i].free_count;
@@ -253,7 +258,7 @@ static void aligned_test(void)
         TLSF_CREATE_THREAD(&threads[i], aligned_thread_func, &ids[i]);
     }
     for (int i = 0; i < NUM_THREADS; i++)
-        TLSF_JOIN_THREAD(threads[i], NULL);
+        TLSF_JOIN_THREAD(threads[i]);
 
     tlsf_thread_check(&ts);
 
