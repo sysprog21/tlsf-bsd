@@ -62,27 +62,97 @@ extern "C" {
 
 #ifndef TLSF_LOCK_T
 
-#include <pthread.h>
+#if defined(_MSC_VER)
+#if (_MSC_VER < 1935)
+#error Incompatible Visual C++ version. Requires VS 2022 17.5+ for C11 threads support.
+#elif !defined(__STDC_VERSION__) || (__STDC_VERSION__ < 201112L)
+#error MSVC /std:c11 compiler switch is missing! Please enable C11 standard or higher in project properties.
+#else
+#define C11_THREADS_SUPPORT 1
+#endif
+#else
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && !defined(__STDC_NO_THREADS__)
+#define C11_THREADS_SUPPORT 1
+#endif
+#endif
 
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+#define TLSF_THREAD_WIN
+#elif defined (__unix__) || defined(__APPLE__) || defined(__posix) || defined(__FreeBSD__) || defined(__linux__) || defined(__linux)
+#define TLSF_THREAD_POSIX
+#endif
+
+/* It is possible to switch to C11 threads in non windows environment too. For this define TLSF_C11_THREADS macro
+before include this header */
+#if (defined(TLSF_THREAD_WIN) && defined(C11_THREADS_SUPPORT)) || (defined(TLSF_C11_THREADS) && defined(C11_THREADS_SUPPORT))
+#define USE_C11_THREADS 1
+#endif
+
+#if defined(USE_C11_THREADS)
+#include <threads.h>
+#elif
+#include <pthread.h>
+#endif
+
+#if defined(USE_C11_THREADS)
+#define TLSF_LOCK_T mtx_t
+#define TLSF_LOCK_INIT(l) mtx_init((l), mtx_plain)
+#define TLSF_LOCK_DESTROY(l) mtx_destroy((l))
+#define TLSF_LOCK_ACQUIRE(l) mtx_lock((l))
+#define TLSF_LOCK_RELEASE(l) mtx_unlock((l))
+#define TLSF_LOCK_TRY(l) (mtx_trylock((l)) == thrd_success)
+#else
 #define TLSF_LOCK_T pthread_mutex_t
 #define TLSF_LOCK_INIT(l) pthread_mutex_init((l), NULL)
 #define TLSF_LOCK_DESTROY(l) pthread_mutex_destroy((l))
 #define TLSF_LOCK_ACQUIRE(l) pthread_mutex_lock((l))
 #define TLSF_LOCK_RELEASE(l) pthread_mutex_unlock((l))
 #define TLSF_LOCK_TRY(l) (pthread_mutex_trylock((l)) == 0)
-
-#ifndef TLSF_THREAD_HINT
-/* Fold upper bits into lower 32 to retain entropy on 64-bit systems. */
-#define TLSF_THREAD_HINT()                    \
-    ((unsigned) ((uintptr_t) pthread_self() ^ \
-                 ((uintptr_t) pthread_self() >> 16)))
 #endif
 
-#endif /* TLSF_LOCK_T */
-
-/* Fallback thread hint for custom locks without a custom hint. */
+/* Fold upper bits into lower 32 to retain entropy on 64-bit systems. */
 #ifndef TLSF_THREAD_HINT
+#if defined(USE_C11_THREADS)
+#if defined(TLSF_THREAD_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#define TLSF_THREAD_HINT() ((unsigned) GetCurrentThreadId())
+#elif defined(TLSF_THREAD_POSIX)
+#include <pthread.h>
+#define TLSF_THREAD_HINT()                 \
+                ((unsigned) ((uintptr_t) pthread_self() ^ \
+                             ((uintptr_t) pthread_self() >> 16)))
+#else
+#define TLSF_THREAD_HINT()                 \
+                ((unsigned) ((uintptr_t) thrd_current() ^ \
+                             ((uintptr_t) thrd_current() >> 16)))
+#endif
+#elif defined(C11_THREADS_SUPPORT) || defined(TLSF_C11_THREADS)
 #define TLSF_THREAD_HINT() 0U
+#else
+#if defined(TLSF_THREAD_POSIX)
+#define TLSF_THREAD_HINT()                    \
+                ((unsigned) ((uintptr_t) pthread_self() ^ \
+                             ((uintptr_t) pthread_self() >> 16)))
+#else
+#define TLSF_THREAD_HINT() 0U
+#endif
+#endif
+#endif
+
+#endif
+
+#if defined(_MSC_VER)
+#define TLSF_MSVC_ALIGN(x) __declspec(align(x))
+#define TLSF_GCC_ALIGN(x) 
+#elif defined(__GNUC__) || defined(__clang__)
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x) __attribute__((aligned(x)))
+#else
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x)
 #endif
 
 /*
@@ -115,12 +185,12 @@ _Static_assert(TLSF_ARENA_COUNT >= 1, "TLSF_ARENA_COUNT must be >= 1");
 _Static_assert((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
                "TLSF_CACHELINE_SIZE must be a power of two");
 
-typedef struct {
+TLSF_MSVC_ALIGN(TLSF_CACHELINE_SIZE) typedef struct {
     tlsf_t pool;
     TLSF_LOCK_T lock;
     void *base;      /* Arena memory base (for pointer ownership) */
     size_t capacity; /* Arena memory size in bytes */
-} __attribute__((aligned(TLSF_CACHELINE_SIZE))) tlsf_arena_t;
+} TLSF_GCC_ALIGN(TLSF_CACHELINE_SIZE) tlsf_arena_t;
 
 typedef struct {
     tlsf_arena_t arenas[TLSF_ARENA_COUNT];

@@ -7,15 +7,23 @@
 #include <stdbool.h>
 #include <string.h>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+
 #include "tlsf.h"
 
 #ifndef UNLIKELY
+#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || defined(__clang__)
 #define UNLIKELY(x) __builtin_expect(!!(x), false)
+#else
+#define UNLIKELY(x) (!!(x))
+#endif
 #endif
 
 /* All allocation sizes and addresses are aligned. */
 #define ALIGN_SIZE ((size_t) 1 << ALIGN_SHIFT)
-#if __SIZE_WIDTH__ == 64
+#if _TLSF_SIZE_WIDTH == 64
 #define ALIGN_SHIFT 3
 #else
 #define ALIGN_SHIFT 2
@@ -101,7 +109,13 @@
 #define BLOCK_PAYLOAD_OVERHEAD (sizeof(struct tlsf_block *) * 3)
 
 #ifndef INLINE
+#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || defined(__clang__)
 #define INLINE static inline __attribute__((always_inline))
+#elif defined(_MSC_VER) 
+#define INLINE static __forceinline
+#elif
+#define INLINE static inline
+#endif
 #endif
 
 typedef struct tlsf_block tlsf_block_t;
@@ -124,7 +138,7 @@ _Static_assert(TLSF_SPLIT_THRESHOLD >= BLOCK_SIZE_MIN,
                "split threshold must be at least minimum block size");
 _Static_assert(_TLSF_FL_COUNT >= 1,
                "TLSF_MAX_POOL_BITS too small for this architecture");
-_Static_assert(FL_MAX < __SIZE_WIDTH__,
+_Static_assert(FL_MAX < _TLSF_SIZE_WIDTH,
                "TLSF_MAX_POOL_BITS must be less than pointer width");
 
 /*
@@ -136,26 +150,58 @@ _Static_assert(FL_MAX < __SIZE_WIDTH__,
  * Note: __attribute__((weak)) requires GCC or Clang.  On compilers
  * without weak symbol support, users must always define tlsf_resize.
  */
+#if defined defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) ||  defined(__clang__)
 __attribute__((weak)) void *tlsf_resize(tlsf_t *t, size_t size)
 {
     (void) t;
     (void) size;
     return NULL;
 }
+#elif defined(_MSC_VER)
+void* tlsf_resize_default(tlsf_t* t, size_t size)
+{
+    (void)t;
+    (void)size;
+    return NULL;
+}
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_tlsf_resize=_tlsf_resize_default")
+#else
+#pragma comment(linker, "/alternatename:tlsf_resize=tlsf_resize_default")
+#endif
+#endif 
 
 INLINE uint32_t bitmap_ffs(uint32_t x)
 {
     ASSERT(x, "no set bit found");
+#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || defined(__clang__)
     return (uint32_t) __builtin_ctz(x);
+#elif defined(_MSC_VER)
+    unsigned long index;
+    if (_BitScanForward(&index, x)) {
+        return (int)(index);
+    }
+    return 0;
+#endif
 }
 
 INLINE uint32_t log2floor(size_t x)
 {
     ASSERT(x > 0, "log2 of zero");
-#if __SIZE_WIDTH__ == 64
+#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || defined(__clang__)
+#if _TLSF_SIZE_WIDTH == 64
     return (uint32_t) (63 - (uint32_t) __builtin_clzll((unsigned long long) x));
+#elif defined(_MSC_VER)
+    return (uint32_t) (63 - (uint32_t) msc_clzll((unsigned long long) x));
+#endif
+#elif defined(_MSC_VER)
+    unsigned long index;
+#if _TLSF_SIZE_WIDTH == 64
+    _BitScanReverse64(&index, (unsigned __int64)x);
 #else
-    return (uint32_t) (31 - (uint32_t) __builtin_clzl((unsigned long) x));
+    _BitScanReverse(&index, (unsigned long)x);
+#endif
+    return (uint32_t)index;
 #endif
 }
 
@@ -322,7 +368,7 @@ INLINE size_t round_block_size(size_t size)
      * because shifting zero by any valid amount yields zero.
      */
     uint32_t shift =
-        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (__SIZE_WIDTH__ - 1));
+        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
     size_t round = is_large << shift;
     /* Large: (1 << shift) - 1 = SL rounding mask.  Small: 0 - 0 = 0. */
     size_t t = round - is_large;
@@ -341,7 +387,14 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
     /* All-ones mask when size is in the linear range (< BLOCK_SIZE_SMALL),
      * all-zeros when in the logarithmic range.
      */
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4146)
+#endif
     uint32_t small = -(uint32_t) (t < (uint32_t) FL_SHIFT);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     /* FL: 0 for small sizes, (t - FL_SHIFT + 1) for large sizes.
      * The wrapping subtraction when t < FL_SHIFT is harmless because
@@ -354,7 +407,7 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
      * the garbage result is masked out by `small`.
      */
     uint32_t shift =
-        (t - (uint32_t) SL_SHIFT) & ((uint32_t) (__SIZE_WIDTH__ - 1));
+        (t - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
     uint32_t sl_large = (uint32_t) (size >> shift) ^ SL_COUNT;
     uint32_t sl_small = (uint32_t) (size >> ALIGN_SHIFT);
     *sl = (~small & sl_large) | (small & sl_small);
