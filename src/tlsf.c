@@ -191,8 +191,8 @@ INLINE uint32_t log2floor(size_t x)
 #if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || defined(__clang__)
 #if _TLSF_SIZE_WIDTH == 64
     return (uint32_t) (63 - (uint32_t) __builtin_clzll((unsigned long long) x));
-#elif defined(_MSC_VER)
-    return (uint32_t) (63 - (uint32_t) msc_clzll((unsigned long long) x));
+#else
+    return (uint32_t) (31 - (uint32_t) __builtin_clzl((unsigned long) x));
 #endif
 #elif defined(_MSC_VER)
     unsigned long index;
