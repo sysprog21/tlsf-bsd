@@ -59,9 +59,9 @@ static tlsf_thread_t ts;
 #endif
 
 #if defined(_MSC_VER)
-#define TLSF_RAND rand_s
+#define TLSF_RAND(x) (rand_s((x)), (unsigned)*(x))
 #else
-#define TLSF_RAND rand_r
+#define TLSF_RAND(x) rand_r(x)
 #endif
 
 /* ------------------------------------------------------------------ */
