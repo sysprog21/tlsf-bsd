@@ -74,7 +74,22 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CFLAGS: ${{ matrix.cflags }}
-
+  
+  build-windows-msvc:
+    needs: coding-style
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Compile with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\test.c /Fe:test_tlsf.exe
+      - name: Run Tests
+        run: |
+          .\test_tlsf.exe
+  
   wcet:
     needs: [coding-style, build-and-test]
     runs-on: ${{ matrix.runner }}
