@@ -113,7 +113,7 @@
 #define INLINE static inline __attribute__((always_inline))
 #elif defined(_MSC_VER) 
 #define INLINE static __forceinline
-#elif
+#else
 #define INLINE static inline
 #endif
 #endif

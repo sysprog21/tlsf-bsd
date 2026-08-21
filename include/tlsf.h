@@ -34,7 +34,7 @@ extern "C" {
 #endif
 #elif defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) ||  defined(__clang__)
 #define _TLSF_SIZE_WIDTH __SIZE_WIDTH__
-#elif
+#else
 #if INTPTR_MAX == INT64_MAX
 #define _TLSF_SIZE_WIDTH 64
 #elif INTPTR_MAX == INT32_MAX
