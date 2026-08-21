@@ -41,7 +41,6 @@ static tlsf_thread_t ts;
 #define TLSF_THREAD_T thrd_t
 #define TLSF_CREATE_THREAD(thrd, func, arg) thrd_create(thrd, func, arg)
 #define TLSF_JOIN_THREAD(thrd) thrd_join((thrd), NULL)
-#define TLSF_JOIN_THREAD(thrd) thrd_join((thrd), NULL)
 #define TLSF_THREAD_CONVENTION int
 #define TLSF_THREAD_RETURN 0
 #elif defined(TLSF_THREAD_POSIX)
