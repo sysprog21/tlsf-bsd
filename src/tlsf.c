@@ -150,7 +150,7 @@ _Static_assert(FL_MAX < _TLSF_SIZE_WIDTH,
  * Note: __attribute__((weak)) requires GCC or Clang.  On compilers
  * without weak symbol support, users must always define tlsf_resize.
  */
-#if defined defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) ||  defined(__clang__)
+#if defined (__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) ||  defined(__clang__)
 __attribute__((weak)) void *tlsf_resize(tlsf_t *t, size_t size)
 {
     (void) t;
