@@ -43,66 +43,61 @@ static inline int arena_find(const tlsf_thread_t *ts, const void *ptr)
     return -1;
 }
 
+/* Allocate from one arena. align == 0 selects plain tlsf_malloc, which keeps
+ * the malloc and aligned-alloc paths from being two copies of everything.
+ * Caller holds the arena lock.
+ */
+static void *arena_alloc(tlsf_arena_t *a, size_t align, size_t size)
+{
+    return align ? tlsf_aalloc(&a->pool, align, size)
+                 : tlsf_malloc(&a->pool, size);
+}
+
 /* Try to allocate from arenas other than `skip`, using non-blocking try-lock
  * first, then blocking acquire.
  *
  * Returns NULL if all arenas are exhausted.
  */
-static void *arena_fallback_malloc(tlsf_thread_t *ts, int skip, size_t size)
+static void *arena_fallback_alloc(tlsf_thread_t *ts,
+                                  int skip,
+                                  size_t align,
+                                  size_t size)
 {
-    void *ptr;
-
-    /* Phase 1: non-blocking scan */
-    for (int i = 1; i < ts->count; i++) {
-        int idx = (skip + i) % ts->count;
-        if (TLSF_LOCK_TRY(&ts->arenas[idx].lock)) {
-            ptr = tlsf_malloc(&ts->arenas[idx].pool, size);
+    /* Pass 0: skip arenas that are busy. Pass 1: wait for them. */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 1; i < ts->count; i++) {
+            int idx = (skip + i) % ts->count;
+            if (!pass) {
+                if (!TLSF_LOCK_TRY(&ts->arenas[idx].lock))
+                    continue;
+            } else {
+                TLSF_LOCK_ACQUIRE(&ts->arenas[idx].lock);
+            }
+            void *ptr = arena_alloc(&ts->arenas[idx], align, size);
             TLSF_LOCK_RELEASE(&ts->arenas[idx].lock);
             if (ptr)
                 return ptr;
         }
-    }
-
-    /* Phase 2: blocking scan */
-    for (int i = 1; i < ts->count; i++) {
-        int idx = (skip + i) % ts->count;
-        TLSF_LOCK_ACQUIRE(&ts->arenas[idx].lock);
-        ptr = tlsf_malloc(&ts->arenas[idx].pool, size);
-        TLSF_LOCK_RELEASE(&ts->arenas[idx].lock);
-        if (ptr)
-            return ptr;
     }
 
     return NULL;
 }
 
-static void *arena_fallback_aalloc(tlsf_thread_t *ts,
-                                   int skip,
-                                   size_t align,
-                                   size_t size)
+/* Preferred arena first, then everyone else. */
+static void *thread_alloc(tlsf_thread_t *ts, size_t align, size_t size)
 {
-    void *ptr;
+    if (!ts || !ts->count)
+        return NULL;
 
-    for (int i = 1; i < ts->count; i++) {
-        int idx = (skip + i) % ts->count;
-        if (TLSF_LOCK_TRY(&ts->arenas[idx].lock)) {
-            ptr = tlsf_aalloc(&ts->arenas[idx].pool, align, size);
-            TLSF_LOCK_RELEASE(&ts->arenas[idx].lock);
-            if (ptr)
-                return ptr;
-        }
-    }
+    int preferred = arena_select(ts);
 
-    for (int i = 1; i < ts->count; i++) {
-        int idx = (skip + i) % ts->count;
-        TLSF_LOCK_ACQUIRE(&ts->arenas[idx].lock);
-        ptr = tlsf_aalloc(&ts->arenas[idx].pool, align, size);
-        TLSF_LOCK_RELEASE(&ts->arenas[idx].lock);
-        if (ptr)
-            return ptr;
-    }
+    TLSF_LOCK_ACQUIRE(&ts->arenas[preferred].lock);
+    void *ptr = arena_alloc(&ts->arenas[preferred], align, size);
+    TLSF_LOCK_RELEASE(&ts->arenas[preferred].lock);
+    if (ptr)
+        return ptr;
 
-    return NULL;
+    return arena_fallback_alloc(ts, preferred, align, size);
 }
 
 size_t tlsf_thread_init(tlsf_thread_t *ts, void *mem, size_t bytes)
@@ -132,12 +127,21 @@ size_t tlsf_thread_init(tlsf_thread_t *ts, void *mem, size_t bytes)
 
         ts->arenas[i].base = base + (size_t) i * per_arena;
         ts->arenas[i].capacity = chunk;
-        TLSF_LOCK_INIT(&ts->arenas[i].lock);
+
+        /* A failed lock init leaves an unusable mutex behind, so bail out
+         * before any caller can acquire it. Only locks [0, i) exist here.
+         */
+        if (TLSF_LOCK_INIT(&ts->arenas[i].lock) != 0) {
+            for (int j = 0; j < i; j++)
+                TLSF_LOCK_DESTROY(&ts->arenas[j].lock);
+            memset(ts, 0, sizeof(*ts));
+            return 0;
+        }
 
         size_t usable =
             tlsf_pool_init(&ts->arenas[i].pool, ts->arenas[i].base, chunk);
         if (!usable) {
-            /* Cleanup previously initialized arenas. */
+            /* Cleanup previously initialized arenas, including this one. */
             for (int j = 0; j <= i; j++)
                 TLSF_LOCK_DESTROY(&ts->arenas[j].lock);
             memset(ts, 0, sizeof(*ts));
@@ -161,43 +165,23 @@ void tlsf_thread_destroy(tlsf_thread_t *ts)
 
 void *tlsf_thread_malloc(tlsf_thread_t *ts, size_t size)
 {
-    if (!ts->count)
-        return NULL;
-
-    int preferred = arena_select(ts);
-    void *ptr;
-
-    /* Fast path: thread-preferred arena. */
-    TLSF_LOCK_ACQUIRE(&ts->arenas[preferred].lock);
-    ptr = tlsf_malloc(&ts->arenas[preferred].pool, size);
-    TLSF_LOCK_RELEASE(&ts->arenas[preferred].lock);
-    if (ptr)
-        return ptr;
-
-    /* Slow path: try remaining arenas. */
-    return arena_fallback_malloc(ts, preferred, size);
+    return thread_alloc(ts, 0, size);
 }
 
 void *tlsf_thread_aalloc(tlsf_thread_t *ts, size_t align, size_t size)
 {
-    if (!ts->count)
+    /* Reject align == 0 here rather than letting it mean "plain malloc"
+     * internally; tlsf_aalloc() rejects it too.
+     */
+    if (!align)
         return NULL;
 
-    int preferred = arena_select(ts);
-    void *ptr;
-
-    TLSF_LOCK_ACQUIRE(&ts->arenas[preferred].lock);
-    ptr = tlsf_aalloc(&ts->arenas[preferred].pool, align, size);
-    TLSF_LOCK_RELEASE(&ts->arenas[preferred].lock);
-    if (ptr)
-        return ptr;
-
-    return arena_fallback_aalloc(ts, preferred, align, size);
+    return thread_alloc(ts, align, size);
 }
 
 void tlsf_thread_free(tlsf_thread_t *ts, void *ptr)
 {
-    if (!ptr)
+    if (!ts || !ptr)
         return;
 
     int idx = arena_find(ts, ptr);
@@ -211,6 +195,9 @@ void tlsf_thread_free(tlsf_thread_t *ts, void *ptr)
 
 void *tlsf_thread_realloc(tlsf_thread_t *ts, void *ptr, size_t size)
 {
+    if (!ts)
+        return NULL;
+
     if (!ptr)
         return tlsf_thread_malloc(ts, size);
 
