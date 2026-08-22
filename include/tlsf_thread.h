@@ -203,7 +203,7 @@ TLSF_STATIC_ASSERT(TLSF_ARENA_COUNT >= 1, "TLSF_ARENA_COUNT must be >= 1");
 #endif
 
 TLSF_STATIC_ASSERT((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
-               "TLSF_CACHELINE_SIZE must be a power of two");
+                   "TLSF_CACHELINE_SIZE must be a power of two");
 
 TLSF_MSVC_ALIGN(TLSF_CACHELINE_SIZE) typedef struct {
     tlsf_t pool;

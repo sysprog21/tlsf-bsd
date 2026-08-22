@@ -118,14 +118,16 @@ extern "C" {
 #if __has_extension(c_static_assert) || __has_feature(c_static_assert)
 #define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #endif
-#elif defined(__GNUC__) && ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6)) && \
+#elif defined(__GNUC__) &&                                        \
+    ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6)) && \
     !defined(__STRICT_ANSI__)
 #define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #else
-#define TLSF_SASSERT_GLUE(a, b) a ## b
+#define TLSF_SASSERT_GLUE(a, b) a##b
 #define TLSF_SASSERT_JOIN(a, b) TLSF_SASSERT_GLUE(a, b)
-#define TLSF_STATIC_ASSERT(cond, msg) \
-        typedef char TLSF_SASSERT_JOIN(STATIC_ASSERT_FAILED_AT_LINE_, __LINE__)[(cond) ? 1 : -1]
+#define TLSF_STATIC_ASSERT(cond, msg)                             \
+    typedef char TLSF_SASSERT_JOIN(STATIC_ASSERT_FAILED_AT_LINE_, \
+                                   __LINE__)[(cond) ? 1 : -1]
 #endif
 #endif
 
