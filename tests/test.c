@@ -864,6 +864,85 @@ static void zero_size_align_test(tlsf_t *t)
     printf(". done\n");
 }
 
+/* Pool utilization: a fixed pool must be able to hand out roughly its whole
+ * capacity, not just the first block.
+ *
+ * Regression guard for block_find_free(). When it inflated the allocation to
+ * mapping_size() of the bin the block was FOUND in, rather than leaving it at
+ * the rounded request, the first malloc from a fresh pool swallowed almost the
+ * entire arena: a 1 MB pool served exactly two 1 KB allocations (0.2%
+ * utilization) before reporting exhaustion.
+ */
+static void pool_utilization_test(void)
+{
+    printf("Pool utilization test: ");
+    fflush(stdout);
+
+    static char pool[TLSF_TEST_POOL_CLAMP(256 * 1024)];
+
+    for (size_t req = 64; req <= 8192; req <<= 1) {
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
+        assert(usable > 0);
+        if (req > usable / 8)
+            break; /* too coarse to say anything useful about this pool */
+
+        size_t handed_out = 0;
+        unsigned n = 0;
+        while (tlsf_malloc(&t, req)) {
+            handed_out += req;
+            n++;
+        }
+        tlsf_check(&t);
+
+        /* Every allocation costs a header and is rounded up to a bin
+         * boundary, so exact capacity is not predictable. Anything below half
+         * the pool means blocks are being inflated, not merely rounded.
+         */
+        assert(n > 1);
+        assert(handed_out > usable / 2);
+        printf(".");
+        fflush(stdout);
+    }
+    printf(" done\n");
+}
+
+/* Issue #4: a freed block must land in the bin that a same-size request will
+ * search, so free-then-reallocate at the same size reuses the same address.
+ * Guards against a future change that searches with the rounded size but
+ * stores the block at the unrounded one. The block under test is sandwiched
+ * between live allocations so it cannot coalesce and mask the result.
+ */
+static void reuse_same_address_test(void)
+{
+    printf("Free/realloc address reuse test: ");
+    fflush(stdout);
+
+    static char pool[TLSF_TEST_POOL_CLAMP(256 * 1024)];
+    unsigned checked = 0;
+
+    for (size_t sz = 24; sz <= 16384; sz = sz + 1 + sz / 8) {
+        tlsf_t t;
+        assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+        void *guard_lo = tlsf_malloc(&t, 64);
+        void *p = tlsf_malloc(&t, sz);
+        if (!p)
+            break; /* larger sizes will not fit either */
+        void *guard_hi = tlsf_malloc(&t, 64);
+        assert(guard_lo && guard_hi);
+
+        tlsf_free(&t, p);
+        void *again = tlsf_malloc(&t, sz);
+        assert(again == p);
+        tlsf_check(&t);
+        checked++;
+    }
+
+    assert(checked > 0);
+    printf("%u sizes done\n", checked);
+}
+
 /* Test pool reset: O(1) bulk deallocation for static pools. */
 static void pool_reset_test(void)
 {
@@ -1029,6 +1108,12 @@ int main(void)
 
     /* Run pool reset test */
     pool_reset_test();
+
+    /* Run pool utilization test */
+    pool_utilization_test();
+
+    /* Run free/realloc address reuse test */
+    reuse_same_address_test();
 
     puts("OK!");
     return 0;

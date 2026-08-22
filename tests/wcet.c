@@ -307,17 +307,10 @@ static void measure_malloc_best(char *pool,
 
 /* Allocate three adjacent blocks of the requested size from a static pool.
  *
- * TLSF's block_find_free updates the request size to mapping_size(found_bin),
- * which can be far larger than the original request when the pool has a single
- * huge free block (e.g., requesting 1024 from a 4MB pool allocates ~4MB due to
- * bin-minimum inflation). This prevents multiple allocations from a fresh pool.
- *
- * Workaround: allocate each block at the inflated size, then immediately
- * realloc down to the target size. Realloc's trim path (block_rtrim_used)
- * splits the oversized block, returning the excess to the free list. The excess
- * merges with any adjacent free block, making space for the next allocation.
- * After three malloc+realloc cycles, we have three adjacent blocks of the
- * correct size.
+ * This used to need a malloc-then-realloc-down dance: block_find_free()
+ * inflated each request to the minimum size of the bin the block was found in,
+ * so the first allocation from a fresh pool swallowed nearly the whole arena.
+ * That inflation is gone, and plain malloc now returns a correctly sized block.
  */
 static void alloc_three_blocks(tlsf_t *t,
                                size_t alloc_size,
@@ -326,19 +319,9 @@ static void alloc_three_blocks(tlsf_t *t,
                                void **c)
 {
     *a = tlsf_malloc(t, alloc_size);
-    assert(*a);
-    *a = tlsf_realloc(t, *a, alloc_size);
-    assert(*a);
-
     *b = tlsf_malloc(t, alloc_size);
-    assert(*b);
-    *b = tlsf_realloc(t, *b, alloc_size);
-    assert(*b);
-
     *c = tlsf_malloc(t, alloc_size);
-    assert(*c);
-    *c = tlsf_realloc(t, *c, alloc_size);
-    assert(*c);
+    assert(*a && *b && *c);
 }
 
 /* free worst case: Block sandwiched between two free neighbors.

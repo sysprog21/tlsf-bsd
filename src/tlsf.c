@@ -479,16 +479,6 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
     ASSERT(*sl < SL_COUNT, "wrong second level");
 }
 
-/* Calculate the minimum block size for a given FL/SL bin */
-INLINE size_t mapping_size(uint32_t fl, uint32_t sl)
-{
-    if (fl == 0)
-        return sl * (BLOCK_SIZE_SMALL / SL_COUNT);
-
-    size_t size = (size_t) 1 << (fl + FL_SHIFT - 1);
-    return size + (sl * (size >> SL_SHIFT));
-}
-
 INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
 {
     ASSERT(*fl < FL_COUNT, "wrong first level");
@@ -936,11 +926,15 @@ INLINE tlsf_block_t *block_find_free(tlsf_t *t, size_t *size)
         ASSERT(block, "no block found");
     }
 
-    /* Update size to match the FL/SL bin that was actually used. This ensures
-     * that when the block is freed, it will be placed in the same bin it was
-     * allocated from.
+    /* *size stays at the rounded request. round_block_size() above already put
+     * it exactly on a bin boundary, which is what issue #4 requires: a freed
+     * block lands in the bin a same-size request will search.
+     *
+     * Do NOT substitute mapping_size(fl, sl) here. block_find_suitable() may
+     * return a block from a LARGER bin than the request maps to, and inflating
+     * the allocation to that bin's minimum hands out the whole block: a fresh 1
+     * MB pool then served two 1 KB allocations instead of ~1000.
      */
-    *size = mapping_size(fl, sl);
     ASSERT(block_size(block) >= *size, "insufficient block size");
     remove_free_block(t, block, fl, sl);
     return block;
