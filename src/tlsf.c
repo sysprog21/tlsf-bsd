@@ -11,6 +11,20 @@
 #include <intrin.h>
 #endif
 
+/* Bit-scan intrinsic selection. Toolchains that are neither GCC-family nor MSVC
+ * (IAR, Green Hills, TI, ARM Compiler 5) fall through to the portable
+ * implementations below, which are fixed-step and therefore still O(1). Define
+ * TLSF_NO_INTRINSICS to force that path; CI uses it to test it.
+ */
+#ifndef TLSF_NO_INTRINSICS
+#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
+    defined(__clang__)
+#define TLSF_BUILTIN_BITSCAN 1
+#elif defined(_MSC_VER)
+#define TLSF_MSVC_BITSCAN 1
+#endif
+#endif
+
 #include "tlsf.h"
 
 #ifndef UNLIKELY
@@ -106,6 +120,12 @@
  */
 #define BLOCK_PAYLOAD_OVERHEAD (sizeof(struct tlsf_block *) * 3)
 
+/* Forcing always_inline costs 168 bytes of .text over plain `static inline` at
+ * -O2 (6236 vs 6068, clang/arm64), because the compiler already inlines these
+ * helpers on its own. Median malloc_worst latency is identical at 42 ticks
+ * either way; the tails are scheduler noise. Override with -DINLINE="static
+ * inline" if a target's icache budget says otherwise.
+ */
 #ifndef INLINE
 #if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
     defined(__clang__)
@@ -172,36 +192,79 @@ void *tlsf_resize_default(tlsf_t *t, size_t size)
 INLINE uint32_t bitmap_ffs(uint32_t x)
 {
     ASSERT(x, "no set bit found");
-#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
-    defined(__clang__)
+#if defined(TLSF_BUILTIN_BITSCAN)
     return (uint32_t) __builtin_ctz(x);
-#elif defined(_MSC_VER)
+#elif defined(TLSF_MSVC_BITSCAN)
     unsigned long index;
-    if (_BitScanForward(&index, x)) {
-        return (int) (index);
-    }
-    return 0;
+    return _BitScanForward(&index, x) ? (uint32_t) index : 0;
+#else
+    /* Isolate the lowest set bit, then accumulate its index with five mask
+     * tests. Each mask covers the positions whose index has that bit set.
+     */
+    uint32_t lsb = x & (~x + 1U);
+    uint32_t n = 0;
+    if (lsb & 0xFFFF0000U)
+        n += 16;
+    if (lsb & 0xFF00FF00U)
+        n += 8;
+    if (lsb & 0xF0F0F0F0U)
+        n += 4;
+    if (lsb & 0xCCCCCCCCU)
+        n += 2;
+    if (lsb & 0xAAAAAAAAU)
+        n += 1;
+    return n;
 #endif
 }
 
 INLINE uint32_t log2floor(size_t x)
 {
     ASSERT(x > 0, "log2 of zero");
-#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
-    defined(__clang__)
+#if defined(TLSF_BUILTIN_BITSCAN)
 #if _TLSF_SIZE_WIDTH == 64
     return (uint32_t) (63 - (uint32_t) __builtin_clzll((unsigned long long) x));
 #else
     return (uint32_t) (31 - (uint32_t) __builtin_clzl((unsigned long) x));
 #endif
-#elif defined(_MSC_VER)
-    unsigned long index;
+#elif defined(TLSF_MSVC_BITSCAN)
+    /* Zero-initialized: the intrinsic leaves index untouched when x is 0, and
+     * ASSERT is compiled out in release builds.
+     */
+    unsigned long index = 0;
 #if _TLSF_SIZE_WIDTH == 64
     _BitScanReverse64(&index, (unsigned __int64) x);
 #else
     _BitScanReverse(&index, (unsigned long) x);
 #endif
     return (uint32_t) index;
+#else
+    /* Fixed-step binary search over the word. */
+    uint32_t n = 0;
+#if _TLSF_SIZE_WIDTH == 64
+    if (x >> 32) {
+        x >>= 32;
+        n += 32;
+    }
+#endif
+    if (x >> 16) {
+        x >>= 16;
+        n += 16;
+    }
+    if (x >> 8) {
+        x >>= 8;
+        n += 8;
+    }
+    if (x >> 4) {
+        x >>= 4;
+        n += 4;
+    }
+    if (x >> 2) {
+        x >>= 2;
+        n += 2;
+    }
+    if (x >> 1)
+        n += 1;
+    return n;
 #endif
 }
 
@@ -320,7 +383,7 @@ INLINE tlsf_block_t *block_link_next(tlsf_block_t *block)
     return next;
 }
 
-INLINE bool block_can_split(tlsf_block_t *block, size_t size)
+INLINE bool block_can_split(const tlsf_block_t *block, size_t size)
 {
     return block_size(block) >= sizeof(tlsf_block_t) + size;
 }
@@ -328,7 +391,7 @@ INLINE bool block_can_split(tlsf_block_t *block, size_t size)
 /* When trimming, require the remainder to be at least TLSF_SPLIT_THRESHOLD to
  * avoid creating tiny free blocks that waste metadata overhead.
  */
-INLINE bool block_can_trim(tlsf_block_t *block, size_t size)
+INLINE bool block_can_trim(const tlsf_block_t *block, size_t size)
 {
     return block_size(block) >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
 }
@@ -414,16 +477,6 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
 
     ASSERT(*fl < FL_COUNT, "wrong first level");
     ASSERT(*sl < SL_COUNT, "wrong second level");
-}
-
-/* Calculate the minimum block size for a given FL/SL bin */
-INLINE size_t mapping_size(uint32_t fl, uint32_t sl)
-{
-    if (fl == 0)
-        return sl * (BLOCK_SIZE_SMALL / SL_COUNT);
-
-    size_t size = (size_t) 1 << (fl + FL_SHIFT - 1);
-    return size + (sl * (size >> SL_SHIFT));
 }
 
 INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
@@ -539,7 +592,7 @@ INLINE tlsf_block_t *block_split(tlsf_block_t *block, size_t size)
 }
 
 /* Absorb a free block's storage into an adjacent previous free block. */
-INLINE tlsf_block_t *block_absorb(tlsf_block_t *prev, tlsf_block_t *block)
+INLINE tlsf_block_t *block_absorb(tlsf_block_t *prev, const tlsf_block_t *block)
 {
     ASSERT(block_size(prev), "previous block can't be last");
     /* Note: Leaves flags untouched. */
@@ -631,20 +684,48 @@ INLINE void check_sentinel(tlsf_block_t *block)
     ASSERT(!block_is_free(block), "sentinel block should not be free");
 }
 
+/* Point every bin at the free-list sentinel and clear the bitmaps, so that
+ * insert/remove can write unconditionally without a NULL check. Cost is a fixed
+ * O(FL_COUNT * SL_COUNT) regardless of how much is allocated.
+ */
+static void bins_reset(tlsf_t *t)
+{
+    t->fl = 0;
+    memset(t->sl, 0, sizeof(t->sl));
+    for (uint32_t i = 0; i < FL_COUNT; i++)
+        for (uint32_t j = 0; j < SL_COUNT; j++)
+            t->block[i][j] = &t->block_null;
+}
+
+/* Lay out a pool as a single free block of `free_size` payload bytes followed
+ * by the terminating zero-size sentinel. `start` is the first payload byte; the
+ * block header sits one word below it, and that block's prev field lies outside
+ * the pool and is never read.
+ */
+static void pool_build(tlsf_t *t, char *start, size_t free_size)
+{
+    tlsf_block_t *block = to_block(start - BLOCK_OVERHEAD);
+    block->header = free_size | BLOCK_BIT_FREE;
+    block_insert(t, block);
+
+    tlsf_block_t *sentinel = block_link_next(block);
+    sentinel->header = BLOCK_BIT_PREV_FREE;
+    check_sentinel(sentinel);
+
+    block_poison_free(block);
+}
+
 static bool arena_grow(tlsf_t *t, size_t size)
 {
-    /* Static pools cannot grow. */
-    if (t->arena)
+    /* Fixed pools cannot grow. */
+    if (t->fixed)
         return false;
 
     /* First use of a dynamic pool: point all empty-bin pointers at the sentinel
      * so that insert/remove can write unconditionally.
      */
-    if (!t->size) {
-        for (uint32_t i = 0; i < FL_COUNT; i++)
-            for (uint32_t j = 0; j < SL_COUNT; j++)
-                t->block[i][j] = &t->block_null;
-    }
+    if (!t->size)
+        bins_reset(t);
 
     size_t req_size =
         (t->size ? t->size + BLOCK_OVERHEAD : 2 * BLOCK_OVERHEAD) + size;
@@ -660,6 +741,11 @@ static bool arena_grow(tlsf_t *t, size_t size)
     if (!addr)
         return false;
     ASSERT((size_t) addr % ALIGN_SIZE == 0, "wrong heap alignment address");
+
+    /* Cache the base so later reads (tlsf_check, tlsf_get_stats, pool append)
+     * never have to call back into tlsf_resize just to learn the address.
+     */
+    t->arena = addr;
 
     /* Clear stale ASan shadow in the growth region: prior arena_shrink cycles
      * may have left poisoned shadow bytes that were never cleared.
@@ -689,14 +775,14 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
         return 0;
 
     /* Align memory block boundaries */
-    char *start = align_ptr((char *) mem, ALIGN_SIZE);
-    char *end = (char *) mem + size;
+    const char *start = align_ptr((char *) mem, ALIGN_SIZE);
+    const char *end = (char *) mem + size;
     size_t aligned_size = (size_t) (end - start) & ~(ALIGN_SIZE - 1);
 
-    /* For static pools, the new sentinel must fit within the appended region
+    /* For fixed pools, the new sentinel must fit within the appended region
      * itself, since there is no backend to provide extra bytes.
      */
-    if (t->arena) {
+    if (t->fixed) {
         if (aligned_size <= BLOCK_OVERHEAD)
             return 0;
         aligned_size -= BLOCK_OVERHEAD;
@@ -706,11 +792,11 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
         return 0;
 
     /* Get current pool information */
-    void *current_pool_start = t->arena ? t->arena : tlsf_resize(t, t->size);
+    void *current_pool_start = t->arena;
     if (!current_pool_start)
         return 0;
 
-    char *current_pool_end = (char *) current_pool_start + t->size;
+    const char *current_pool_end = (char *) current_pool_start + t->size;
 
     /* Only support coalescing if the new memory is immediately adjacent to the
      * current pool
@@ -728,14 +814,15 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     if (UNLIKELY(new_total_size > (size_t) 1 << FL_MAX))
         return 0;
 
-    /* For dynamic pools, request the backend to extend. For static pools, the
+    /* For dynamic pools, request the backend to extend. For fixed pools, the
      * caller provides adjacent memory directly.
      */
-    if (!t->arena) {
+    if (!t->fixed) {
         void *resized = tlsf_resize(t, new_total_size);
         if (!resized)
             return 0;
         current_pool_start = resized;
+        t->arena = resized;
 
         /* Clear stale ASan shadow in the extension region. */
         ASAN_UNPOISON((char *) resized + old_size, new_total_size - old_size);
@@ -813,8 +900,14 @@ static void arena_shrink(tlsf_t *t, tlsf_block_t *block)
     t->size = t->size - size - BLOCK_OVERHEAD;
     if (t->size == BLOCK_OVERHEAD)
         t->size = 0;
-    tlsf_resize(t, t->size);
-    if (t->size) {
+    void *addr = tlsf_resize(t, t->size);
+    if (!t->size) {
+        /* Pool fully released; the next allocation grows it from scratch. */
+        t->arena = NULL;
+    } else {
+        /* Keep the previous base if the backend declined to shrink. */
+        if (addr)
+            t->arena = addr;
         block->header = 0;
         check_sentinel(block);
     }
@@ -833,11 +926,15 @@ INLINE tlsf_block_t *block_find_free(tlsf_t *t, size_t *size)
         ASSERT(block, "no block found");
     }
 
-    /* Update size to match the FL/SL bin that was actually used. This ensures
-     * that when the block is freed, it will be placed in the same bin it was
-     * allocated from.
+    /* *size stays at the rounded request. round_block_size() above already put
+     * it exactly on a bin boundary, which is what issue #4 requires: a freed
+     * block lands in the bin a same-size request will search.
+     *
+     * Do NOT substitute mapping_size(fl, sl) here. block_find_suitable() may
+     * return a block from a LARGER bin than the request maps to, and inflating
+     * the allocation to that bin's minimum hands out the whole block: a fresh 1
+     * MB pool then served two 1 KB allocations instead of ~1000.
      */
-    *size = mapping_size(fl, sl);
     ASSERT(block_size(block) >= *size, "insufficient block size");
     remove_free_block(t, block, fl, sl);
     return block;
@@ -898,7 +995,8 @@ void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size)
 
     ASAN_UNPOISON(block_payload(block), block_size(block));
 
-    char *mem = align_ptr(block_payload(block) + sizeof(tlsf_block_t), align);
+    const char *mem =
+        align_ptr(block_payload(block) + sizeof(tlsf_block_t), align);
     block = block_ltrim_free(t, block, (size_t) (mem - block_payload(block)));
     return block_use(t, block, adjust);
 }
@@ -917,7 +1015,7 @@ void tlsf_free(tlsf_t *t, void *mem)
 
     block_poison_free(block);
 
-    if (UNLIKELY(!block_size(block_next(block))) && !t->arena)
+    if (UNLIKELY(!block_size(block_next(block))) && !t->fixed)
         arena_shrink(t, block);
     else
         block_insert(t, block);
@@ -927,7 +1025,7 @@ size_t tlsf_usable_size(void *ptr)
 {
     if (UNLIKELY(!ptr))
         return 0;
-    tlsf_block_t *block = block_from_payload(ptr);
+    const tlsf_block_t *block = block_from_payload(ptr);
     ASSERT(!block_is_free(block), "block must be allocated");
     return block_size(block);
 }
@@ -1049,9 +1147,7 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
      * sentinel so that free-list insert/remove can write unconditionally.
      */
     memset(t, 0, sizeof(*t));
-    for (uint32_t i = 0; i < FL_COUNT; i++)
-        for (uint32_t j = 0; j < SL_COUNT; j++)
-            t->block[i][j] = &t->block_null;
+    bins_reset(t);
 
     /* Align pool start */
     char *start = align_ptr((char *) mem, ALIGN_SIZE);
@@ -1069,73 +1165,40 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (free_size < BLOCK_SIZE_MIN || free_size > BLOCK_SIZE_MAX)
         return 0;
 
-    /* Mark as static (fixed-size) pool */
+    /* Mark as a fixed-size, caller-owned pool */
+    t->fixed = true;
     t->arena = start;
 
-    /* Set up the initial free block. The block struct starts at start -
-     * BLOCK_OVERHEAD so that block->header aligns with start. The prev field
-     * sits before the arena and is never accessed for the first block.
-     */
-    tlsf_block_t *block = to_block(start - BLOCK_OVERHEAD);
-    block->header = free_size | BLOCK_BIT_FREE;
-    block_insert(t, block);
-
-    /* Set up sentinel at the end of the free block */
-    tlsf_block_t *sentinel = block_link_next(block);
-    sentinel->header = BLOCK_BIT_PREV_FREE;
-    check_sentinel(sentinel);
-
+    pool_build(t, start, free_size);
     t->size = free_size + 2 * BLOCK_OVERHEAD;
-
-    block_poison_free(block);
 
     return free_size;
 }
 
 void tlsf_pool_reset(tlsf_t *t)
 {
-    if (!t || !t->arena)
+    if (!t || !t->fixed)
         return;
 
     /* Unpoison the entire pool for ASan. */
     ASAN_UNPOISON(t->arena, t->size);
 
-    /* Clear bitmaps. */
-    t->fl = 0;
-    memset(t->sl, 0, sizeof(t->sl));
+    bins_reset(t);
 
-    /* Reset all bin pointers to sentinel. */
-    for (uint32_t i = 0; i < FL_COUNT; i++)
-        for (uint32_t j = 0; j < SL_COUNT; j++)
-            t->block[i][j] = &t->block_null;
-
-    /* Reconstruct the single free block spanning the entire pool. Same layout
-     * as the second half of tlsf_pool_init().
-     */
-    size_t free_size = t->size - 2 * BLOCK_OVERHEAD;
-
-    tlsf_block_t *block = to_block((char *) t->arena - BLOCK_OVERHEAD);
-    block->header = free_size | BLOCK_BIT_FREE;
-    block_insert(t, block);
-
-    /* Sentinel at the end of the pool. */
-    tlsf_block_t *sentinel = block_link_next(block);
-    sentinel->header = BLOCK_BIT_PREV_FREE;
-    check_sentinel(sentinel);
-
-    block_poison_free(block);
+    /* Reconstruct the single free block spanning the entire pool. */
+    pool_build(t, (char *) t->arena, t->size - 2 * BLOCK_OVERHEAD);
 }
 
 #ifdef TLSF_ENABLE_CHECK
 #include <stdio.h>
 #include <stdlib.h>
 #define CHECK(cond, msg)                                          \
-    ({                                                            \
+    do {                                                          \
         if (!(cond)) {                                            \
             fprintf(stderr, "TLSF CHECK: %s - %s\n", msg, #cond); \
             abort();                                              \
         }                                                         \
-    })
+    } while (0)
 
 /**
  * Comprehensive heap consistency check.
@@ -1155,7 +1218,7 @@ void tlsf_check(tlsf_t *t)
         return;
 
     /* Get arena start */
-    void *arena_start = t->arena ? t->arena : tlsf_resize(t, t->size);
+    void *arena_start = t->arena;
     CHECK(arena_start, "failed to get arena pointer");
     CHECK((size_t) arena_start % ALIGN_SIZE == 0, "arena not aligned");
 
@@ -1272,8 +1335,8 @@ void tlsf_check(tlsf_t *t)
              * that each block maps to its bin, so a block cannot appear in two
              * different bins without failing the fl/sl check first.
              */
-            tlsf_block_t *list_prev = &t->block_null;
-            tlsf_block_t *fast = list_block;
+            const tlsf_block_t *list_prev = &t->block_null;
+            const tlsf_block_t *fast = list_block;
             while (list_block != &t->block_null) {
                 list_free_count++;
 
@@ -1333,10 +1396,6 @@ void tlsf_check(tlsf_t *t)
 /**
  * Collect heap statistics by walking all blocks.
  *
- * Note: This function relies on tlsf_resize(t, t->size) being idempotent
- * (returning the current arena address without reallocation). The platform-
- * specific tlsf_resize implementation must honor this contract.
- *
  * Statistics semantics:
  * - total_free/total_used: Payload bytes (usable by application)
  * - overhead: Metadata bytes (block headers + sentinel)
@@ -1358,14 +1417,11 @@ int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
     if (!t->size)
         return 0; /* Empty pool */
 
-    /* Get arena start. For static pools, use the stored arena pointer. For
-     * dynamic pools, query via tlsf_resize (which must return the current arena
-     * pointer without reallocation or side effects).
-     *
-     * The first block is at arena_start - BLOCK_OVERHEAD because the
-     * tlsf_block_t structure's prev field precedes the header.
+    /* t->arena is the current base for both fixed and dynamic pools. The first
+     * block sits at arena_start - BLOCK_OVERHEAD because the tlsf_block_t
+     * structure's prev field precedes the header.
      */
-    void *arena_start = t->arena ? t->arena : tlsf_resize(t, t->size);
+    void *arena_start = t->arena;
     if (!arena_start)
         return -1;
 

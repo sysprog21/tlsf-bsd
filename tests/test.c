@@ -23,6 +23,8 @@
 
 #include "tlsf.h"
 
+#include "pool_limits.h"
+
 static size_t PAGE;
 static size_t MAX_PAGES;
 static size_t curr_pages = 0;
@@ -196,9 +198,23 @@ static void random_sizes_test(tlsf_t *t)
 {
     const size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 1024 * 1024};
 
+    /* random_test() creates up to 2 * spacelen live allocations, each costing
+     * at least TLSF_TEST_BLOCK_COST bytes, and the arena can never exceed
+     * 2^_TLSF_FL_MAX bytes. The item count dominates the 6 * spacelen payload
+     * bound, so size from that; halve again for fragmentation headroom. Skip
+     * entries a reduced TLSF_MAX_POOL_BITS cannot serve rather than asserting.
+     */
+    const size_t space_cap =
+        ((size_t) 1 << _TLSF_FL_MAX) / (4 * TLSF_TEST_BLOCK_COST);
+
     printf("Random allocation test: ");
     for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
         unsigned n = 1024;
+
+        if (sizes[i] > space_cap) {
+            printf("(skip %zu: pool limit) ", sizes[i]);
+            continue;
+        }
 
         while (n--)
 #if defined(_MSC_VER)
@@ -246,6 +262,15 @@ static void large_size_test(tlsf_t *t)
 #endif
     if (max_test > TLSF_MAX_SIZE)
         max_test = TLSF_MAX_SIZE;
+
+    /* large_alloc() keeps two blocks of this size live at once, and the arena
+     * can never exceed 2^_TLSF_FL_MAX bytes. Leave room for both plus metadata
+     * so the test tracks a reduced TLSF_MAX_POOL_BITS instead of assuming the
+     * default configuration.
+     */
+    size_t pool_cap = TLSF_TEST_POOL_MAX;
+    if (max_test > pool_cap)
+        max_test = pool_cap;
 
     size_t s = 1;
     while (s <= max_test) {
@@ -566,7 +591,7 @@ static void static_pool_test(void)
 
     /* Test 1: Basic init, alloc, free */
     {
-        static char pool[1024 * 1024]; /* 1 MB */
+        static char pool[TLSF_TEST_POOL_CLAMP(1024 * 1024)];
         tlsf_t t;
         size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
         assert(usable > 0);
@@ -839,6 +864,129 @@ static void zero_size_align_test(tlsf_t *t)
     printf(". done\n");
 }
 
+/* Pool utilization: a fixed pool must be able to hand out roughly its whole
+ * capacity, not just the first block.
+ *
+ * Regression guard for block_find_free(). When it inflated the allocation to
+ * mapping_size() of the bin the block was FOUND in, rather than leaving it at
+ * the rounded request, the first malloc from a fresh pool swallowed almost the
+ * entire arena: a 1 MB pool served exactly two 1 KB allocations (0.2%
+ * utilization) before reporting exhaustion.
+ */
+static void pool_utilization_test(void)
+{
+    printf("Pool utilization test: ");
+    fflush(stdout);
+
+    static char pool[TLSF_TEST_POOL_CLAMP(256 * 1024)];
+
+    for (size_t req = 64; req <= 8192; req <<= 1) {
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
+        assert(usable > 0);
+        if (req > usable / 8)
+            break; /* too coarse to say anything useful about this pool */
+
+        size_t handed_out = 0;
+        unsigned n = 0;
+        while (tlsf_malloc(&t, req)) {
+            handed_out += req;
+            n++;
+        }
+        tlsf_check(&t);
+
+        /* Every allocation costs a header and is rounded up to a bin
+         * boundary, so exact capacity is not predictable. Anything below half
+         * the pool means blocks are being inflated, not merely rounded.
+         */
+        assert(n > 1);
+        assert(handed_out > usable / 2);
+        printf(".");
+        fflush(stdout);
+    }
+    printf(" done\n");
+}
+
+/* TLSF_MAX_POOL_BYTES must equal what tlsf_pool_init() actually accepts.
+ *
+ * A _Static_assert cannot establish this. The macro and the internal block
+ * constants are definitionally the same expression, so asserting they are
+ * equal is a tautology that survives any drift in the acceptance logic itself:
+ * a different overhead-word count, a changed alignment round-down, an extra
+ * sentinel. Only calling the function pins the published ceiling to reality.
+ *
+ * The ceiling is 256 GiB in the default configuration, far past what can be
+ * backed with memory, so the boundary is exercised under a reduced
+ * TLSF_MAX_POOL_BITS. CI covers 20 and 24.
+ */
+static void pool_ceiling_test(void)
+{
+    printf("Pool ceiling test: ");
+    fflush(stdout);
+
+    if (TLSF_MAX_POOL_BYTES > (size_t) 64 << 20) {
+        printf(
+            "skipped (ceiling %zu bytes exceeds what we can allocate; "
+            "build with -DTLSF_MAX_POOL_BITS=24 or less to cover it)\n",
+            (size_t) TLSF_MAX_POOL_BYTES);
+        return;
+    }
+
+    /* One extra alignment step so the reject case has memory behind it. */
+    const size_t align = sizeof(void *);
+    char *mem = (char *) malloc(TLSF_MAX_POOL_BYTES + align);
+    assert(mem);
+    assert((size_t) mem % align == 0); /* else adj shifts the boundary */
+
+    tlsf_t t;
+    size_t at = tlsf_pool_init(&t, mem, TLSF_MAX_POOL_BYTES);
+    assert(at > 0); /* the published ceiling must be accepted */
+    tlsf_check(&t);
+
+    size_t over = tlsf_pool_init(&t, mem, TLSF_MAX_POOL_BYTES + align);
+    assert(over == 0); /* and one alignment step past it must not be */
+
+    free(mem);
+    printf("%zu accepted, +%zu rejected\n", (size_t) TLSF_MAX_POOL_BYTES,
+           align);
+}
+
+/* Issue #4: a freed block must land in the bin that a same-size request will
+ * search, so free-then-reallocate at the same size reuses the same address.
+ * Guards against a future change that searches with the rounded size but
+ * stores the block at the unrounded one. The block under test is sandwiched
+ * between live allocations so it cannot coalesce and mask the result.
+ */
+static void reuse_same_address_test(void)
+{
+    printf("Free/realloc address reuse test: ");
+    fflush(stdout);
+
+    static char pool[TLSF_TEST_POOL_CLAMP(256 * 1024)];
+    unsigned checked = 0;
+
+    for (size_t sz = 24; sz <= 16384; sz = sz + 1 + sz / 8) {
+        tlsf_t t;
+        assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+        void *guard_lo = tlsf_malloc(&t, 64);
+        void *p = tlsf_malloc(&t, sz);
+        if (!p)
+            break; /* larger sizes will not fit either */
+        void *guard_hi = tlsf_malloc(&t, 64);
+        assert(guard_lo && guard_hi);
+
+        tlsf_free(&t, p);
+        void *again = tlsf_malloc(&t, sz);
+        assert(again == p);
+        tlsf_check(&t);
+        checked++;
+    }
+
+    assert(checked > 0);
+    printf("%u sizes done\n", checked);
+}
+
 /* Test pool reset: O(1) bulk deallocation for static pools. */
 static void pool_reset_test(void)
 {
@@ -1004,6 +1152,15 @@ int main(void)
 
     /* Run pool reset test */
     pool_reset_test();
+
+    /* Run pool utilization test */
+    pool_utilization_test();
+
+    /* Run free/realloc address reuse test */
+    reuse_same_address_test();
+
+    /* Run pool ceiling test */
+    pool_ceiling_test();
 
     puts("OK!");
     return 0;

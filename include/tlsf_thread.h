@@ -48,9 +48,14 @@ extern "C" {
  * providing custom locks, also define TLSF_THREAD_HINT() to return a
  * thread-specific unsigned integer for arena selection.
  *
+ * TLSF_LOCK_INIT must evaluate to an int: 0 on success, non-zero on failure.
+ * tlsf_thread_init() checks it and aborts initialization if a lock cannot be
+ * created. The other five macros are used as statements or as a boolean
+ * (TLSF_LOCK_TRY) and their values are otherwise ignored.
+ *
  * Example (FreeRTOS):
  *   #define TLSF_LOCK_T           SemaphoreHandle_t
- *   #define TLSF_LOCK_INIT(l)     (*(l) = xSemaphoreCreateMutex())
+ *   #define TLSF_LOCK_INIT(l)     ((*(l) = xSemaphoreCreateMutex()) ? 0 : -1)
  *   #define TLSF_LOCK_DESTROY(l)  vSemaphoreDelete(*(l))
  *   #define TLSF_LOCK_ACQUIRE(l)  xSemaphoreTake(*(l), portMAX_DELAY)
  *   #define TLSF_LOCK_RELEASE(l)  xSemaphoreGive(*(l))
@@ -103,7 +108,8 @@ extern "C" {
 
 #if defined(USE_C11_THREADS)
 #define TLSF_LOCK_T mtx_t
-#define TLSF_LOCK_INIT(l) mtx_init((l), mtx_plain)
+/* C11 does not require thrd_success to be 0, so normalize it. */
+#define TLSF_LOCK_INIT(l) (mtx_init((l), mtx_plain) == thrd_success ? 0 : -1)
 #define TLSF_LOCK_DESTROY(l) mtx_destroy((l))
 #define TLSF_LOCK_ACQUIRE(l) mtx_lock((l))
 #define TLSF_LOCK_RELEASE(l) mtx_unlock((l))
@@ -262,6 +268,10 @@ void tlsf_thread_check(tlsf_thread_t *ts);
 /**
  * Aggregate statistics across all arenas. largest_free reports the single
  * largest free block in any arena.
+ *
+ * Not an atomic snapshot: arena locks are taken one at a time, so concurrent
+ * allocations in an already-visited arena are not reflected. Quiesce the other
+ * threads first if you need an exact figure.
  */
 int tlsf_thread_stats(tlsf_thread_t *ts, tlsf_stats_t *stats);
 

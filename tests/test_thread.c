@@ -24,9 +24,11 @@
 
 #include "tlsf_thread.h"
 
+#include "pool_limits.h"
+
 /* Test parameters (tuned for < 2s on modern hardware) */
 
-#define POOL_SIZE (4 * 1024 * 1024) /* 4 MB static pool */
+#define POOL_SIZE TLSF_TEST_POOL_CLAMP(4 * 1024 * 1024) /* 4 MB static pool */
 #define NUM_THREADS 8
 #define OPS_PER_THREAD 50000
 #define MAX_ALLOCS 128

@@ -14,8 +14,30 @@
 extern "C" {
 #endif /* __cplusplus */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+/* IMPORTANT: the configuration macros below (TLSF_MAX_POOL_BITS in particular)
+ * change the layout and size of tlsf_t, which callers allocate themselves.
+ * Every translation unit in a build -- src/tlsf.c and every consumer -- must
+ * see identical definitions. A mismatch is not diagnosed: the struct silently
+ * differs in size (8376 vs 3440 bytes for the default vs TLSF_MAX_POOL_BITS=20
+ * on 64-bit) and accesses land at the wrong offsets. Define them in the build
+ * system, never in a single .c file.
+ *
+ * TLSF_ENABLE_CHECK is a special case, and it is only half-safe. tlsf_check()
+ * is an extern function when it is defined and a static inline no-op when it
+ * is not, so a mismatch behaves differently depending on which side has it:
+ *
+ *   consumer has it, tlsf.c does not -> undefined reference at link time
+ *   tlsf.c has it, consumer does not -> links fine, and every tlsf_check()
+ *                                       call in the consumer silently becomes
+ *                                       a no-op
+ *
+ * The second direction produces no diagnostic at all: the heap checking a
+ * caller believes is enabled simply is not running. Set it uniformly.
+ */
 
 /* Second-level subdivisions: 32 bins per first-level class. Max internal
  * fragmentation bounded by 1/SL_COUNT = 3.125% (was 6.25% with 16 bins).
@@ -67,6 +89,17 @@ extern "C" {
 #endif
 #define _TLSF_FL_COUNT (_TLSF_FL_MAX - _TLSF_FL_SHIFT + 1)
 #define TLSF_MAX_SIZE (((size_t) 1 << (_TLSF_FL_MAX - 1)) - sizeof(size_t))
+
+/* Largest region tlsf_pool_init() accepts, for an ALIGN_SIZE-aligned pointer.
+ * The pool's single initial free block cannot exceed 2^(_TLSF_FL_MAX - 1)
+ * bytes, and the pool also carries that block's header and a sentinel.
+ *
+ * A region is accepted when its size, rounded down to the alignment, is at
+ * most this; a few trailing bytes past it are tolerated and ignored. Note this
+ * is about half of 2^_TLSF_FL_MAX, which bounds a *dynamic* arena instead.
+ */
+#define TLSF_MAX_POOL_BYTES \
+    (((size_t) 1 << (_TLSF_FL_MAX - 1)) + 2 * sizeof(size_t))
 #define TLSF_INIT ((tlsf_t) {.size = 0})
 
 /* TLSF_INIT_STATIC is need to be used instead of TLSF_INIT for initializing
@@ -95,7 +128,13 @@ struct tlsf_block {
 
 typedef struct {
     uint32_t fl, sl[_TLSF_FL_COUNT];
-    void *arena; /* Pool base address; non-NULL for fixed pools */
+
+    /* Fixed pool: memory is caller-owned (tlsf_pool_init) and the arena can
+     * neither grow nor shrink. Orthogonal to `arena`, which is always the
+     * current base address once the pool has any memory.
+     */
+    bool fixed;
+    void *arena; /* Pool base address; NULL until a dynamic pool first grows */
     size_t size;
     struct tlsf_block *block[_TLSF_FL_COUNT][_TLSF_SL_COUNT];
     struct tlsf_block block_null; /* Free-list sentinel (absorbs writes) */

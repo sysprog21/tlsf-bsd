@@ -116,8 +116,8 @@ static void compute_stats(double *samples, size_t n, stats_t *stats)
         stats->median = samples[n / 2];
 
     /* Safe percentile indexing with bounds check */
-    size_t p5_idx = (size_t) (n * 0.05);
-    size_t p95_idx = (size_t) (n * 0.95);
+    size_t p5_idx = (size_t) ((double) n * 0.05);
+    size_t p95_idx = (size_t) ((double) n * 0.95);
     if (p5_idx >= n)
         p5_idx = 0;
     if (p95_idx >= n)
@@ -373,12 +373,11 @@ int main(int argc, char **argv)
         seed = 1; /* xorshift32 requires non-zero state */
     xorshift_state = seed;
 
-    if (!quiet)
-        printf("Random seed: %u (use for reproducibility)\n\n", seed);
-
     /* Warmup phase - stabilize caches, TLB, branch predictors */
-    if (!quiet)
+    if (!quiet) {
+        printf("Random seed: %u (use for reproducibility)\n\n", seed);
         printf("Warming up (%zu iterations)...\n", warmup);
+    }
 
     for (size_t i = 0; i < warmup; i++) {
         run_alloc_benchmark(loops, blk_min, blk_max, blk_array, num_blks,

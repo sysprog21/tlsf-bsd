@@ -62,6 +62,34 @@ jobs:
           - runner: ubuntu-24.04-arm
             cc: gcc
             cflags: "-fsanitize=address,undefined"
+          # ThreadSanitizer: the only sanitizer that sees races in the
+          # per-arena locking of src/tlsf_thread.c. ASan does not.
+          - runner: ubuntu-24.04
+            cc: clang
+            cflags: "-fsanitize=thread"
+          - runner: ubuntu-24.04-arm
+            cc: gcc
+            cflags: "-fsanitize=thread"
+          # Compile-time configuration knobs. Without these the reduced-pool
+          # and split-threshold paths rot untested.
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: "-DTLSF_MAX_POOL_BITS=20"
+          - runner: ubuntu-24.04
+            cc: clang
+            cflags: "-DTLSF_MAX_POOL_BITS=24 -fsanitize=address,undefined"
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: "-DTLSF_SPLIT_THRESHOLD=64"
+          # Portable bit-scan fallbacks used by toolchains without
+          # __builtin_ctz / _BitScanForward. Unreachable on these runners
+          # unless forced.
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: "-DTLSF_NO_INTRINSICS"
+          - runner: ubuntu-24.04
+            cc: clang
+            cflags: "-DTLSF_NO_INTRINSICS -fsanitize=address,undefined"
     steps:
       - uses: actions/checkout@v6
       - name: Build
@@ -75,17 +103,38 @@ jobs:
           CC: ${{ matrix.cc }}
           CFLAGS: ${{ matrix.cflags }}
   
+  # 32-bit build: exercises the _TLSF_SIZE_WIDTH == 32 paths (ALIGN_SHIFT 2,
+  # _TLSF_FL_MAX 31, __builtin_clzl) that the 64-bit matrix never compiles.
+  build-32bit:
+    needs: coding-style
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install multilib toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      - name: Build
+        run: make all
+        env:
+          CFLAGS: "-m32"
+      - name: Test
+        run: make check
+        env:
+          CFLAGS: "-m32"
+
   build-windows-msvc:
     needs: coding-style
     runs-on: windows-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
       - name: Compile Single-Threaded TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\test.c /Fe:test_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\test.c /Fe:test_tlsf.exe
       - name: Run Single-Threaded Tests
         run: |
           .\test_tlsf.exe

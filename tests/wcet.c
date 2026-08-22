@@ -42,6 +42,8 @@
 
 #include "tlsf.h"
 
+#include "pool_limits.h"
+
 /* Timing primitives */
 
 typedef uint64_t tick_t;
@@ -305,17 +307,10 @@ static void measure_malloc_best(char *pool,
 
 /* Allocate three adjacent blocks of the requested size from a static pool.
  *
- * TLSF's block_find_free updates the request size to mapping_size(found_bin),
- * which can be far larger than the original request when the pool has a single
- * huge free block (e.g., requesting 1024 from a 4MB pool allocates ~4MB due to
- * bin-minimum inflation). This prevents multiple allocations from a fresh pool.
- *
- * Workaround: allocate each block at the inflated size, then immediately
- * realloc down to the target size. Realloc's trim path (block_rtrim_used)
- * splits the oversized block, returning the excess to the free list. The excess
- * merges with any adjacent free block, making space for the next allocation.
- * After three malloc+realloc cycles, we have three adjacent blocks of the
- * correct size.
+ * This used to need a malloc-then-realloc-down dance: block_find_free()
+ * inflated each request to the minimum size of the bin the block was found in,
+ * so the first allocation from a fresh pool swallowed nearly the whole arena.
+ * That inflation is gone, and plain malloc now returns a correctly sized block.
  */
 static void alloc_three_blocks(tlsf_t *t,
                                size_t alloc_size,
@@ -324,19 +319,9 @@ static void alloc_three_blocks(tlsf_t *t,
                                void **c)
 {
     *a = tlsf_malloc(t, alloc_size);
-    assert(*a);
-    *a = tlsf_realloc(t, *a, alloc_size);
-    assert(*a);
-
     *b = tlsf_malloc(t, alloc_size);
-    assert(*b);
-    *b = tlsf_realloc(t, *b, alloc_size);
-    assert(*b);
-
     *c = tlsf_malloc(t, alloc_size);
-    assert(*c);
-    *c = tlsf_realloc(t, *c, alloc_size);
-    assert(*c);
+    assert(*a && *b && *c);
 }
 
 /* free worst case: Block sandwiched between two free neighbors.
@@ -494,7 +479,7 @@ static size_t parse_size_arg(const char *arg, const char *name)
 
 /* Main */
 
-#define DEFAULT_POOL_SIZE ((size_t) 4 << 20) /* 4 MB */
+#define DEFAULT_POOL_SIZE TLSF_TEST_POOL_CLAMP((size_t) 4 << 20) /* 4 MB */
 
 int main(int argc, char **argv)
 {
@@ -549,6 +534,25 @@ int main(int argc, char **argv)
         free(pool);
         free(samples);
         return 1;
+    }
+
+    /* -p bypasses DEFAULT_POOL_SIZE's clamp, and a build with a reduced
+     * TLSF_MAX_POOL_BITS caps how large a pool tlsf_pool_init() will accept.
+     * Probe once here so an oversized -p reports the reason, instead of
+     * aborting on an opaque assertion inside a measurement loop.
+     */
+    {
+        tlsf_t probe;
+        if (!tlsf_pool_init(&probe, pool, pool_size)) {
+            fprintf(stderr,
+                    "Error: tlsf_pool_init rejected a %zu byte pool; this "
+                    "build accepts at most %zu bytes "
+                    "(TLSF_MAX_POOL_BYTES, set by TLSF_MAX_POOL_BITS=%d)\n",
+                    pool_size, (size_t) TLSF_MAX_POOL_BYTES, _TLSF_FL_MAX);
+            free(pool);
+            free(samples);
+            return 1;
+        }
     }
 
     if (cold_cache) {
