@@ -114,7 +114,12 @@ extern "C" {
 #ifndef TLSF_STATIC_ASSERT
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 #define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#elif defined(__GNUC__) && ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+#elif defined(__clang__)
+#if __has_extension(c_static_assert) || __has_feature(c_static_assert)
+#define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+#elif defined(__GNUC__) && ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6)) && \
+    !defined(__STRICT_ANSI__)
 #define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #else
 #define TLSF_SASSERT_GLUE(a, b) a ## b
