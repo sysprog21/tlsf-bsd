@@ -192,7 +192,7 @@ extern "C" {
 #define TLSF_ARENA_COUNT 4
 #endif
 
-_Static_assert(TLSF_ARENA_COUNT >= 1, "TLSF_ARENA_COUNT must be >= 1");
+TLSF_STATIC_ASSERT(TLSF_ARENA_COUNT >= 1, "TLSF_ARENA_COUNT must be >= 1");
 
 /* Align each arena to a cache line to prevent false sharing between arenas that
  * would otherwise sit on the same line. 64 bytes is the common L1 cache line
@@ -202,7 +202,7 @@ _Static_assert(TLSF_ARENA_COUNT >= 1, "TLSF_ARENA_COUNT must be >= 1");
 #define TLSF_CACHELINE_SIZE 64
 #endif
 
-_Static_assert((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
+TLSF_STATIC_ASSERT((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
                "TLSF_CACHELINE_SIZE must be a power of two");
 
 TLSF_MSVC_ALIGN(TLSF_CACHELINE_SIZE) typedef struct {
