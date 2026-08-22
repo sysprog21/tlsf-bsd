@@ -1130,12 +1130,12 @@ void tlsf_pool_reset(tlsf_t *t)
 #include <stdio.h>
 #include <stdlib.h>
 #define CHECK(cond, msg)                                          \
-    ({                                                            \
+    do {                                                          \
         if (!(cond)) {                                            \
             fprintf(stderr, "TLSF CHECK: %s - %s\n", msg, #cond); \
             abort();                                              \
         }                                                         \
-    })
+    } while (0)
 
 /**
  * Comprehensive heap consistency check.

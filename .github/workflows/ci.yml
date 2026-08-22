@@ -85,7 +85,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Compile Single-Threaded TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\test.c /Fe:test_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\test.c /Fe:test_tlsf.exe
       - name: Run Single-Threaded Tests
         run: |
           .\test_tlsf.exe
