@@ -42,6 +42,8 @@
 
 #include "tlsf.h"
 
+#include "pool_limits.h"
+
 /* Timing primitives */
 
 typedef uint64_t tick_t;
@@ -494,7 +496,7 @@ static size_t parse_size_arg(const char *arg, const char *name)
 
 /* Main */
 
-#define DEFAULT_POOL_SIZE ((size_t) 4 << 20) /* 4 MB */
+#define DEFAULT_POOL_SIZE TLSF_TEST_POOL_CLAMP((size_t) 4 << 20) /* 4 MB */
 
 int main(int argc, char **argv)
 {

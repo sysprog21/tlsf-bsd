@@ -23,6 +23,8 @@
 
 #include "tlsf.h"
 
+#include "pool_limits.h"
+
 static size_t PAGE;
 static size_t MAX_PAGES;
 static size_t curr_pages = 0;
@@ -196,9 +198,23 @@ static void random_sizes_test(tlsf_t *t)
 {
     const size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 1024 * 1024};
 
+    /* random_test() creates up to 2 * spacelen live allocations, each costing
+     * at least TLSF_TEST_BLOCK_COST bytes, and the arena can never exceed
+     * 2^_TLSF_FL_MAX bytes. The item count dominates the 6 * spacelen payload
+     * bound, so size from that; halve again for fragmentation headroom. Skip
+     * entries a reduced TLSF_MAX_POOL_BITS cannot serve rather than asserting.
+     */
+    const size_t space_cap =
+        ((size_t) 1 << _TLSF_FL_MAX) / (4 * TLSF_TEST_BLOCK_COST);
+
     printf("Random allocation test: ");
     for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
         unsigned n = 1024;
+
+        if (sizes[i] > space_cap) {
+            printf("(skip %zu: pool limit) ", sizes[i]);
+            continue;
+        }
 
         while (n--)
 #if defined(_MSC_VER)
@@ -246,6 +262,15 @@ static void large_size_test(tlsf_t *t)
 #endif
     if (max_test > TLSF_MAX_SIZE)
         max_test = TLSF_MAX_SIZE;
+
+    /* large_alloc() keeps two blocks of this size live at once, and the arena
+     * can never exceed 2^_TLSF_FL_MAX bytes. Leave room for both plus metadata
+     * so the test tracks a reduced TLSF_MAX_POOL_BITS instead of assuming the
+     * default configuration.
+     */
+    size_t pool_cap = TLSF_TEST_POOL_MAX;
+    if (max_test > pool_cap)
+        max_test = pool_cap;
 
     size_t s = 1;
     while (s <= max_test) {
@@ -566,7 +591,7 @@ static void static_pool_test(void)
 
     /* Test 1: Basic init, alloc, free */
     {
-        static char pool[1024 * 1024]; /* 1 MB */
+        static char pool[TLSF_TEST_POOL_CLAMP(1024 * 1024)];
         tlsf_t t;
         size_t usable = tlsf_pool_init(&t, pool, sizeof(pool));
         assert(usable > 0);
