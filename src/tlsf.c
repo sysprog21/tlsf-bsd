@@ -139,25 +139,25 @@
 
 typedef struct tlsf_block tlsf_block_t;
 
-_Static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8,
+TLSF_STATIC_ASSERT(sizeof(size_t) == 4 || sizeof(size_t) == 8,
                "size_t must be 32 or 64 bit");
-_Static_assert(sizeof(size_t) == sizeof(void *),
+TLSF_STATIC_ASSERT(sizeof(size_t) == sizeof(void *),
                "size_t must equal pointer size");
-_Static_assert(ALIGN_SIZE == BLOCK_SIZE_SMALL / SL_COUNT,
+TLSF_STATIC_ASSERT(ALIGN_SIZE == BLOCK_SIZE_SMALL / SL_COUNT,
                "sizes are not properly set");
-_Static_assert(BLOCK_SIZE_MIN < BLOCK_SIZE_SMALL,
+TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN < BLOCK_SIZE_SMALL,
                "min allocation size is wrong");
-_Static_assert(BLOCK_SIZE_MAX == TLSF_MAX_SIZE + BLOCK_OVERHEAD,
+TLSF_STATIC_ASSERT(BLOCK_SIZE_MAX == TLSF_MAX_SIZE + BLOCK_OVERHEAD,
                "max allocation size is wrong");
-_Static_assert(FL_COUNT <= 32, "index too large");
-_Static_assert(SL_COUNT <= 32, "index too large");
-_Static_assert(FL_COUNT == _TLSF_FL_COUNT, "invalid level configuration");
-_Static_assert(SL_COUNT == _TLSF_SL_COUNT, "invalid level configuration");
-_Static_assert(TLSF_SPLIT_THRESHOLD >= BLOCK_SIZE_MIN,
+TLSF_STATIC_ASSERT(FL_COUNT <= 32, "index too large");
+TLSF_STATIC_ASSERT(SL_COUNT <= 32, "index too large");
+TLSF_STATIC_ASSERT(FL_COUNT == _TLSF_FL_COUNT, "invalid level configuration");
+TLSF_STATIC_ASSERT(SL_COUNT == _TLSF_SL_COUNT, "invalid level configuration");
+TLSF_STATIC_ASSERT(TLSF_SPLIT_THRESHOLD >= BLOCK_SIZE_MIN,
                "split threshold must be at least minimum block size");
-_Static_assert(_TLSF_FL_COUNT >= 1,
+TLSF_STATIC_ASSERT(_TLSF_FL_COUNT >= 1,
                "TLSF_MAX_POOL_BITS too small for this architecture");
-_Static_assert(FL_MAX < _TLSF_SIZE_WIDTH,
+TLSF_STATIC_ASSERT(FL_MAX < _TLSF_SIZE_WIDTH,
                "TLSF_MAX_POOL_BITS must be less than pointer width");
 
 /* Default (weak) implementation of tlsf_resize. Users of tlsf_pool_init() need

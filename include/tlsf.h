@@ -111,6 +111,19 @@ extern "C" {
 #define TLSF_INIT_STATIC ((tlsf_t) {.size = 0})
 #endif
 
+#ifndef TLSF_STATIC_ASSERT
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#elif defined(__GNUC__) && ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+#define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#else
+#define TLSF_SASSERT_GLUE(a, b) a ## b
+#define TLSF_SASSERT_JOIN(a, b) TLSF_SASSERT_GLUE(a, b)
+#define TLSF_STATIC_ASSERT(cond, msg) \
+        typedef char TLSF_SASSERT_JOIN(STATIC_ASSERT_FAILED_AT_LINE_, __LINE__)[(cond) ? 1 : -1]
+#endif
+#endif
+
 /* Block header structure.
  *
  * prev: Pointer to the previous physical block. Only valid when the
