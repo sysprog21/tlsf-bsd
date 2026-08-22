@@ -14,6 +14,7 @@
 extern "C" {
 #endif /* __cplusplus */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -95,7 +96,13 @@ struct tlsf_block {
 
 typedef struct {
     uint32_t fl, sl[_TLSF_FL_COUNT];
-    void *arena; /* Pool base address; non-NULL for fixed pools */
+
+    /* Fixed pool: memory is caller-owned (tlsf_pool_init) and the arena can
+     * neither grow nor shrink. Orthogonal to `arena`, which is always the
+     * current base address once the pool has any memory.
+     */
+    bool fixed;
+    void *arena; /* Pool base address; NULL until a dynamic pool first grows */
     size_t size;
     struct tlsf_block *block[_TLSF_FL_COUNT][_TLSF_SL_COUNT];
     struct tlsf_block block_null; /* Free-list sentinel (absorbs writes) */

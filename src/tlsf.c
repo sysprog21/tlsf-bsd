@@ -690,8 +690,8 @@ INLINE void check_sentinel(tlsf_block_t *block)
 
 static bool arena_grow(tlsf_t *t, size_t size)
 {
-    /* Static pools cannot grow. */
-    if (t->arena)
+    /* Fixed pools cannot grow. */
+    if (t->fixed)
         return false;
 
     /* First use of a dynamic pool: point all empty-bin pointers at the sentinel
@@ -717,6 +717,11 @@ static bool arena_grow(tlsf_t *t, size_t size)
     if (!addr)
         return false;
     ASSERT((size_t) addr % ALIGN_SIZE == 0, "wrong heap alignment address");
+
+    /* Cache the base so later reads (tlsf_check, tlsf_get_stats, pool append)
+     * never have to call back into tlsf_resize just to learn the address.
+     */
+    t->arena = addr;
 
     /* Clear stale ASan shadow in the growth region: prior arena_shrink cycles
      * may have left poisoned shadow bytes that were never cleared.
@@ -750,10 +755,10 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     char *end = (char *) mem + size;
     size_t aligned_size = (size_t) (end - start) & ~(ALIGN_SIZE - 1);
 
-    /* For static pools, the new sentinel must fit within the appended region
+    /* For fixed pools, the new sentinel must fit within the appended region
      * itself, since there is no backend to provide extra bytes.
      */
-    if (t->arena) {
+    if (t->fixed) {
         if (aligned_size <= BLOCK_OVERHEAD)
             return 0;
         aligned_size -= BLOCK_OVERHEAD;
@@ -763,7 +768,7 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
         return 0;
 
     /* Get current pool information */
-    void *current_pool_start = t->arena ? t->arena : tlsf_resize(t, t->size);
+    void *current_pool_start = t->arena;
     if (!current_pool_start)
         return 0;
 
@@ -785,14 +790,15 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     if (UNLIKELY(new_total_size > (size_t) 1 << FL_MAX))
         return 0;
 
-    /* For dynamic pools, request the backend to extend. For static pools, the
+    /* For dynamic pools, request the backend to extend. For fixed pools, the
      * caller provides adjacent memory directly.
      */
-    if (!t->arena) {
+    if (!t->fixed) {
         void *resized = tlsf_resize(t, new_total_size);
         if (!resized)
             return 0;
         current_pool_start = resized;
+        t->arena = resized;
 
         /* Clear stale ASan shadow in the extension region. */
         ASAN_UNPOISON((char *) resized + old_size, new_total_size - old_size);
@@ -870,8 +876,14 @@ static void arena_shrink(tlsf_t *t, tlsf_block_t *block)
     t->size = t->size - size - BLOCK_OVERHEAD;
     if (t->size == BLOCK_OVERHEAD)
         t->size = 0;
-    tlsf_resize(t, t->size);
-    if (t->size) {
+    void *addr = tlsf_resize(t, t->size);
+    if (!t->size) {
+        /* Pool fully released; the next allocation grows it from scratch. */
+        t->arena = NULL;
+    } else {
+        /* Keep the previous base if the backend declined to shrink. */
+        if (addr)
+            t->arena = addr;
         block->header = 0;
         check_sentinel(block);
     }
@@ -974,7 +986,7 @@ void tlsf_free(tlsf_t *t, void *mem)
 
     block_poison_free(block);
 
-    if (UNLIKELY(!block_size(block_next(block))) && !t->arena)
+    if (UNLIKELY(!block_size(block_next(block))) && !t->fixed)
         arena_shrink(t, block);
     else
         block_insert(t, block);
@@ -1126,7 +1138,8 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (free_size < BLOCK_SIZE_MIN || free_size > BLOCK_SIZE_MAX)
         return 0;
 
-    /* Mark as static (fixed-size) pool */
+    /* Mark as a fixed-size, caller-owned pool */
+    t->fixed = true;
     t->arena = start;
 
     /* Set up the initial free block. The block struct starts at start -
@@ -1151,7 +1164,7 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
 
 void tlsf_pool_reset(tlsf_t *t)
 {
-    if (!t || !t->arena)
+    if (!t || !t->fixed)
         return;
 
     /* Unpoison the entire pool for ASan. */
@@ -1212,7 +1225,7 @@ void tlsf_check(tlsf_t *t)
         return;
 
     /* Get arena start */
-    void *arena_start = t->arena ? t->arena : tlsf_resize(t, t->size);
+    void *arena_start = t->arena;
     CHECK(arena_start, "failed to get arena pointer");
     CHECK((size_t) arena_start % ALIGN_SIZE == 0, "arena not aligned");
 
@@ -1390,10 +1403,6 @@ void tlsf_check(tlsf_t *t)
 /**
  * Collect heap statistics by walking all blocks.
  *
- * Note: This function relies on tlsf_resize(t, t->size) being idempotent
- * (returning the current arena address without reallocation). The platform-
- * specific tlsf_resize implementation must honor this contract.
- *
  * Statistics semantics:
  * - total_free/total_used: Payload bytes (usable by application)
  * - overhead: Metadata bytes (block headers + sentinel)
@@ -1415,14 +1424,11 @@ int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
     if (!t->size)
         return 0; /* Empty pool */
 
-    /* Get arena start. For static pools, use the stored arena pointer. For
-     * dynamic pools, query via tlsf_resize (which must return the current arena
-     * pointer without reallocation or side effects).
-     *
-     * The first block is at arena_start - BLOCK_OVERHEAD because the
-     * tlsf_block_t structure's prev field precedes the header.
+    /* t->arena is the current base for both fixed and dynamic pools. The first
+     * block sits at arena_start - BLOCK_OVERHEAD because the tlsf_block_t
+     * structure's prev field precedes the header.
      */
-    void *arena_start = t->arena ? t->arena : tlsf_resize(t, t->size);
+    void *arena_start = t->arena;
     if (!arena_start)
         return -1;
 
