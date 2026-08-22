@@ -18,6 +18,27 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
+/* IMPORTANT: the configuration macros below (TLSF_MAX_POOL_BITS in particular)
+ * change the layout and size of tlsf_t, which callers allocate themselves.
+ * Every translation unit in a build -- src/tlsf.c and every consumer -- must
+ * see identical definitions. A mismatch is not diagnosed: the struct silently
+ * differs in size (8376 vs 3440 bytes for the default vs TLSF_MAX_POOL_BITS=20
+ * on 64-bit) and accesses land at the wrong offsets. Define them in the build
+ * system, never in a single .c file.
+ *
+ * TLSF_ENABLE_CHECK is a special case, and it is only half-safe. tlsf_check()
+ * is an extern function when it is defined and a static inline no-op when it
+ * is not, so a mismatch behaves differently depending on which side has it:
+ *
+ *   consumer has it, tlsf.c does not -> undefined reference at link time
+ *   tlsf.c has it, consumer does not -> links fine, and every tlsf_check()
+ *                                       call in the consumer silently becomes
+ *                                       a no-op
+ *
+ * The second direction produces no diagnostic at all: the heap checking a
+ * caller believes is enabled simply is not running. Set it uniformly.
+ */
+
 /* Second-level subdivisions: 32 bins per first-level class. Max internal
  * fragmentation bounded by 1/SL_COUNT = 3.125% (was 6.25% with 16 bins).
  * Control structure size increases ~2x for the block pointer array.

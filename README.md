@@ -28,7 +28,7 @@ therefore no GPL restrictions apply.
 * Branch-free size-to-bin mapping
 * Optional thread-safe wrapper (`tlsf_thread.h`)
   with per-arena fine-grained locking and configurable lock primitives for RTOS portability
-* ~500 lines of core allocator code
+* ~1400 lines of core allocator code
 * Minimal libc: only `stddef.h`, `stdbool.h`, `stdint.h`, `string.h`
 
 ## Build and Test
@@ -319,12 +319,49 @@ Fewer arenas improve memory utilization at the cost of higher contention.
 
 | Constant | 64-bit | 32-bit | Notes |
 |----------|--------|--------|-------|
-| `TLSF_MAX_SIZE` | ~274 GB | ~2 GB | Reduced by `TLSF_MAX_POOL_BITS` |
+| `TLSF_MAX_SIZE` | 256 GiB - 8 | 1 GiB - 4 | Largest single allocation; reduced by `TLSF_MAX_POOL_BITS` |
+| `TLSF_MAX_POOL_BYTES` | 256 GiB + 16 | 1 GiB + 8 | Largest region `tlsf_pool_init()` accepts |
 | FL classes | 32 | 25 | `_TLSF_FL_MAX - _TLSF_FL_SHIFT + 1` |
 | Alignment | 8 bytes | 4 bytes | |
-| Min block | 16 bytes | 12 bytes | |
+| Min block | 24 bytes | 12 bytes | `sizeof(tlsf_block) - sizeof(ptr)` |
 | Block overhead | 8 bytes | 4 bytes | |
 | SL subdivisions | 32 | 32 | |
+
+### Control structure size
+
+`tlsf_t` is caller-allocated and holds the full `FL x SL` bin array, so its size
+is set entirely by the configuration. The 32x32 default trades memory for a
+worst-case internal fragmentation of 3.125% instead of the 6.25% a 16-wide
+second level would give.
+
+| Configuration | 64-bit `tlsf_t` | Bins | Max pool |
+|---------------|-----------------|------|----------|
+| Default (`_TLSF_FL_MAX` 39) | 8,376 bytes | 1024 | 512 GB |
+| `-DTLSF_MAX_POOL_BITS=24` | 4,480 bytes | 544 | 16 MB |
+| `-DTLSF_MAX_POOL_BITS=20` | 3,440 bytes | 416 | 1 MB |
+| `-DTLSF_MAX_POOL_BITS=18` | 2,920 bytes | 352 | 256 KB |
+
+Smaller values still work; 18 is simply the floor the bundled test suite is
+parameterized for.
+
+`tlsf_thread_t` is roughly `TLSF_ARENA_COUNT` times that, but its exact size
+depends on the platform's lock type, so it is not quoted as a single number
+here. Each arena is padded to `TLSF_CACHELINE_SIZE`:
+
+```
+arena = round_up(sizeof(tlsf_t) + sizeof(TLSF_LOCK_T) + 2 * sizeof(void *),
+                 TLSF_CACHELINE_SIZE)
+total = round_up(arena * TLSF_ARENA_COUNT + sizeof(int), TLSF_CACHELINE_SIZE)
+```
+
+With the default configuration and four arenas that is 34,112 bytes where
+`pthread_mutex_t` is 64 bytes (macOS) and 33,856 where it is 40 bytes (glibc
+x86-64). Print `sizeof(tlsf_thread_t)` on your target rather than relying on
+either figure.
+
+Note that `TLSF_MAX_POOL_BITS` changes the layout of a struct that callers
+allocate themselves. Every translation unit in a build must be compiled with an
+identical set of configuration macros; a mismatch is not diagnosed.
 
 ## WCET Measurement
 
