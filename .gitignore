@@ -17,3 +17,6 @@ tags
 core
 *.dSYM/
 .DS_Store
+build-*/
+.frama-c/
+.frama-c-mcp/

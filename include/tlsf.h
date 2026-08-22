@@ -27,8 +27,8 @@ extern "C" {
  * system, never in a single .c file.
  *
  * TLSF_ENABLE_CHECK is a special case, and it is only half-safe. tlsf_check()
- * is an extern function when it is defined and a static inline no-op when it
- * is not, so a mismatch behaves differently depending on which side has it:
+ * is an extern function when it is defined and a static inline no-op when it is
+ * not, so a mismatch behaves differently depending on which side has it:
  *
  *   consumer has it, tlsf.c does not -> undefined reference at link time
  *   tlsf.c has it, consumer does not -> links fine, and every tlsf_check()
@@ -94,9 +94,9 @@ extern "C" {
  * The pool's single initial free block cannot exceed 2^(_TLSF_FL_MAX - 1)
  * bytes, and the pool also carries that block's header and a sentinel.
  *
- * A region is accepted when its size, rounded down to the alignment, is at
- * most this; a few trailing bytes past it are tolerated and ignored. Note this
- * is about half of 2^_TLSF_FL_MAX, which bounds a *dynamic* arena instead.
+ * A region is accepted when its size, rounded down to the alignment, is at most
+ * this; a few trailing bytes past it are tolerated and ignored. Note this is
+ * about half of 2^_TLSF_FL_MAX, which bounds a *dynamic* arena instead.
  */
 #define TLSF_MAX_POOL_BYTES \
     (((size_t) 1 << (_TLSF_FL_MAX - 1)) + 2 * sizeof(size_t))
@@ -160,13 +160,35 @@ typedef struct {
     struct tlsf_block block_null; /* Free-list sentinel (absorbs writes) */
 } tlsf_t;
 
+/* Bytes of block metadata preceding a payload pointer: the prev field and the
+ * header word. This is the one place the layout is written down for the public
+ * contracts below; src/tlsf.c static-asserts that it matches the real block.
+ */
+#define _TLSF_PAYLOAD_OFFSET (sizeof(struct tlsf_block *) + sizeof(size_t))
+
+/* A pointer previously returned by tlsf_malloc/aalloc/realloc. Callers must
+ * keep the block metadata that precedes the payload intact, because free and
+ * realloc step backwards onto it before touching the payload itself.
+ */
+/*@
+  predicate tlsf_allocated{L}(void *ptr) =
+    \valid((char *)ptr) &&
+    \valid(((char *)ptr - _TLSF_PAYLOAD_OFFSET) +
+           (0 .. _TLSF_PAYLOAD_OFFSET - 1));
+*/
+
 /**
  * Callback to grow or query the memory arena (dynamic pools only). Users of
  * tlsf_pool_init() need not provide this function. A weak default returning
  * NULL is provided in tlsf.c; dynamic pool users MUST override it, otherwise
  * allocations will silently fail.
  */
-void *tlsf_resize(tlsf_t *, size_t);
+/*@
+  requires \valid(t);
+  requires size <= ((size_t)1 << _TLSF_FL_MAX);
+  ensures \result == \null || \valid(((char *)\result) + (0 .. size - 1));
+*/
+void *tlsf_resize(tlsf_t *t, size_t size);
 
 /**
  * Allocate memory with a specified alignment.
@@ -181,7 +203,12 @@ void *tlsf_resize(tlsf_t *, size_t);
  *         failure.  A zero @size request returns a unique minimum-sized
  *         allocation (consistent with tlsf_malloc).
  */
-void *tlsf_aalloc(tlsf_t *, size_t align, size_t size);
+/*@
+  requires \valid(t);
+  ensures (align == 0 || (align & (align - 1)) != 0) ==> \result == \null;
+  ensures \result == \null || \valid(((char *)\result) + (0 .. size - 1));
+*/
+void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size);
 
 /**
  * Append a memory block to an existing pool, potentially coalescing with the
@@ -196,6 +223,11 @@ void *tlsf_aalloc(tlsf_t *, size_t align, size_t size);
  *
  * Return Number of bytes used from the memory block, 0 on failure
  */
+/*@
+  requires \valid(tlsf);
+  requires mem != \null ==> \valid((char *)mem);
+  ensures \result <= size;
+*/
 size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
 
 /**
@@ -213,6 +245,11 @@ size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
  *
  * Return Usable bytes in the pool, or 0 on failure
  */
+/*@
+  requires \valid(t);
+  requires mem != \null ==> \valid((char *)mem);
+  ensures \result == 0 || t->fixed;
+*/
 size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes);
 
 /**
@@ -231,6 +268,7 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes);
  *
  * @t : The TLSF allocator instance
  */
+/*@ requires \valid(t); */
 void tlsf_pool_reset(tlsf_t *t);
 
 /**
@@ -243,13 +281,27 @@ void tlsf_pool_reset(tlsf_t *t);
  * @return Pointer to at least @size bytes, aligned to ALIGN_SIZE (8 on
  *         64-bit, 4 on 32-bit), or NULL on failure.
  */
-void *tlsf_malloc(tlsf_t *, size_t size);
-void *tlsf_realloc(tlsf_t *, void *, size_t);
+/*@
+  requires \valid(t);
+  ensures \result == \null || \valid(((char *)\result) + (0 .. size - 1));
+*/
+void *tlsf_malloc(tlsf_t *t, size_t size);
+
+/*@
+  requires \valid(t);
+  requires mem != \null ==> tlsf_allocated(mem);
+  ensures \result == \null || \valid(((char *)\result) + (0 .. size - 1));
+*/
+void *tlsf_realloc(tlsf_t *t, void *mem, size_t size);
 
 /**
  * Releases the previously allocated memory, given the pointer.
  */
-void tlsf_free(tlsf_t *, void *);
+/*@
+  requires \valid(t);
+  requires mem != \null ==> tlsf_allocated(mem);
+*/
+void tlsf_free(tlsf_t *t, void *mem);
 
 /**
  * Return the usable size of an existing allocation. The usable size may exceed
@@ -261,6 +313,10 @@ void tlsf_free(tlsf_t *, void *);
  *
  * Return Usable payload bytes, or 0 if ptr is NULL
  */
+/*@
+  requires ptr != \null ==> tlsf_allocated(ptr);
+  ensures ptr == \null ==> \result == 0;
+*/
 size_t tlsf_usable_size(void *ptr);
 
 #ifdef TLSF_ENABLE_CHECK
@@ -291,6 +347,18 @@ typedef struct {
  *
  * Return 0 on success, -1 if t or stats is NULL
  */
+/*@
+  behavior invalid:
+    assumes t == \null || stats == \null;
+    assigns \nothing;
+    ensures \result == -1;
+  behavior valid:
+    assumes t != \null && stats != \null;
+    requires \valid(t) && \valid(stats);
+    ensures \result == 0 || \result == -1;
+  complete behaviors;
+  disjoint behaviors;
+*/
 int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats);
 
 #ifdef __cplusplus

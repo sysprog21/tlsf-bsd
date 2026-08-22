@@ -1,5 +1,22 @@
 OUT = build
 
+FRAMAC ?= frama-c
+
+# Leaf helpers carrying ACSL contracts. No caller of these is in the list yet,
+# so every `requires` here is an assumed hypothesis rather than a discharged
+# one: `make verify` proves the helpers consistent with their own contracts,
+# not that the allocator establishes those contracts at the call sites. Extend
+# upward (block_split, block_absorb, block_set_free, ...) to close that gap.
+WP_FUNCTIONS = \
+	align_up,align_ptr,block_payload,to_block,block_from_payload, \
+	block_is_free,block_is_prev_free,block_can_split,block_can_trim, \
+	block_size,block_set_size,block_add_size,block_link,block_absorb_at, \
+	block_split_headers,block_set_free_bit, \
+	block_set_prev_free,block_set_free_at,free_list_link, \
+	free_list_unlink,bin_set_head, \
+	bins_reset,adjust_size,block_prev,block_poison_free,check_sentinel, \
+	bitmap_ffs,log2floor,block_next,round_block_size
+
 TARGETS = \
 	test \
 	bench \
@@ -63,6 +80,30 @@ check: $(TARGETS) $(THREAD_TARGETS)
 	./build/wcet -i 100 -w 10
 	./build/test_thread
 
+# RTE guards are emitted as ACSL asserts, so filtering out @assert would discard
+# every runtime-error obligation that -wp-rte just generated. Keep them counted.
+#
+# Two classes of WP warning are expected and cannot be annotated away:
+#   "Skipped RTE guards" for \aligned and \valid_function, which the Typed
+#   model does not support, and "Cast with incompatible pointers types" for the
+#   char* block arithmetic in block_payload()/to_block(). The Bytes model models
+#   those casts natively and silences the warnings, but it is experimental and
+#   leaves two goals unproved, so Typed+nocast stays.
+verify:
+	@command -v $(FRAMAC) >/dev/null 2>&1 || { \
+		echo "verify: $(FRAMAC) not found; install Frama-C or set FRAMAC=" >&2; \
+		exit 1; \
+	}
+	@output="$$($(FRAMAC) -cpp-extra-args='-Iinclude -DTLSF_ENABLE_CHECK' \
+		-wp -wp-rte -wp-model Typed+nocast -wp-prover Alt-Ergo,Z3 -wp-timeout 40 \
+		-wp-fct='$(WP_FUNCTIONS)' src/tlsf.c 2>&1)"; \
+	status=$$?; \
+	printf '%s\n' "$$output"; \
+	[ $$status -eq 0 ] || exit $$status; \
+	printf '%s\n' "$$output" | awk '\
+		/Proved goals:/ { found = 1; if ($$4 != $$6) bad = 1 } \
+		END { exit !found || bad }'
+
 # Full WCET measurement (10000 iterations, 1000 warmup)
 wcet: all
 	./build/wcet
@@ -82,6 +123,6 @@ clean:
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
 
-.PHONY: all check clean bench bench-quick wcet wcet-quick wcet-plot
+.PHONY: all check clean verify bench bench-quick wcet wcet-quick wcet-plot
 
 -include $(deps)
