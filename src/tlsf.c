@@ -11,6 +11,20 @@
 #include <intrin.h>
 #endif
 
+/* Bit-scan intrinsic selection. Toolchains that are neither GCC-family nor MSVC
+ * (IAR, Green Hills, TI, ARM Compiler 5) fall through to the portable
+ * implementations below, which are fixed-step and therefore still O(1). Define
+ * TLSF_NO_INTRINSICS to force that path; CI uses it to test it.
+ */
+#ifndef TLSF_NO_INTRINSICS
+#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
+    defined(__clang__)
+#define TLSF_BUILTIN_BITSCAN 1
+#elif defined(_MSC_VER)
+#define TLSF_MSVC_BITSCAN 1
+#endif
+#endif
+
 #include "tlsf.h"
 
 #ifndef UNLIKELY
@@ -172,36 +186,79 @@ void *tlsf_resize_default(tlsf_t *t, size_t size)
 INLINE uint32_t bitmap_ffs(uint32_t x)
 {
     ASSERT(x, "no set bit found");
-#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
-    defined(__clang__)
+#if defined(TLSF_BUILTIN_BITSCAN)
     return (uint32_t) __builtin_ctz(x);
-#elif defined(_MSC_VER)
+#elif defined(TLSF_MSVC_BITSCAN)
     unsigned long index;
-    if (_BitScanForward(&index, x)) {
-        return (int) (index);
-    }
-    return 0;
+    return _BitScanForward(&index, x) ? (uint32_t) index : 0;
+#else
+    /* Isolate the lowest set bit, then accumulate its index with five mask
+     * tests. Each mask covers the positions whose index has that bit set.
+     */
+    uint32_t lsb = x & (~x + 1U);
+    uint32_t n = 0;
+    if (lsb & 0xFFFF0000U)
+        n += 16;
+    if (lsb & 0xFF00FF00U)
+        n += 8;
+    if (lsb & 0xF0F0F0F0U)
+        n += 4;
+    if (lsb & 0xCCCCCCCCU)
+        n += 2;
+    if (lsb & 0xAAAAAAAAU)
+        n += 1;
+    return n;
 #endif
 }
 
 INLINE uint32_t log2floor(size_t x)
 {
     ASSERT(x > 0, "log2 of zero");
-#if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
-    defined(__clang__)
+#if defined(TLSF_BUILTIN_BITSCAN)
 #if _TLSF_SIZE_WIDTH == 64
     return (uint32_t) (63 - (uint32_t) __builtin_clzll((unsigned long long) x));
 #else
     return (uint32_t) (31 - (uint32_t) __builtin_clzl((unsigned long) x));
 #endif
-#elif defined(_MSC_VER)
-    unsigned long index;
+#elif defined(TLSF_MSVC_BITSCAN)
+    /* Zero-initialized: the intrinsic leaves index untouched when x is 0, and
+     * ASSERT is compiled out in release builds.
+     */
+    unsigned long index = 0;
 #if _TLSF_SIZE_WIDTH == 64
     _BitScanReverse64(&index, (unsigned __int64) x);
 #else
     _BitScanReverse(&index, (unsigned long) x);
 #endif
     return (uint32_t) index;
+#else
+    /* Fixed-step binary search over the word. */
+    uint32_t n = 0;
+#if _TLSF_SIZE_WIDTH == 64
+    if (x >> 32) {
+        x >>= 32;
+        n += 32;
+    }
+#endif
+    if (x >> 16) {
+        x >>= 16;
+        n += 16;
+    }
+    if (x >> 8) {
+        x >>= 8;
+        n += 8;
+    }
+    if (x >> 4) {
+        x >>= 4;
+        n += 4;
+    }
+    if (x >> 2) {
+        x >>= 2;
+        n += 2;
+    }
+    if (x >> 1)
+        n += 1;
+    return n;
 #endif
 }
 
