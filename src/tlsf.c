@@ -27,6 +27,15 @@
 
 #include "tlsf.h"
 
+/* Used only from ASSERT(), which compiles out when assertions are disabled. */
+#ifndef MAYBE_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define MAYBE_UNUSED __attribute__((unused))
+#else
+#define MAYBE_UNUSED
+#endif
+#endif
+
 #ifndef UNLIKELY
 #if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
     defined(__clang__)
@@ -139,10 +148,38 @@
 
 typedef struct tlsf_block tlsf_block_t;
 
+#define BLOCK_HEADER_OFFSET (sizeof(tlsf_block_t *))
+
+/* The control structure's canonical empty state. This deliberately covers only
+ * bin metadata; physical block-chain invariants are established by pool_build()
+ * and will be layered on top of this predicate.
+ */
+/*@
+  predicate tlsf_aligned_header{L}(tlsf_block_t *block) =
+    \valid_read(block) && block->header % ALIGN_SIZE <= BLOCK_BITS;
+
+  predicate tlsf_empty_bins{L}(tlsf_t *t) =
+    t->fl == 0 &&
+    (\forall integer i; 0 <= i < FL_COUNT ==> t->sl[i] == 0) &&
+    (\forall integer i, j;
+       0 <= i < FL_COUNT && 0 <= j < SL_COUNT ==>
+         t->block[i][j] == &t->block_null);
+
+  predicate tlsf_next_header_span{L}(tlsf_block_t *block) =
+    tlsf_aligned_header(block) &&
+    block->header - block->header % ALIGN_SIZE >= BLOCK_OVERHEAD &&
+    \valid((char *)block +
+           (0 .. BLOCK_HEADER_OFFSET +
+                 block->header - block->header % ALIGN_SIZE -
+                 BLOCK_OVERHEAD + sizeof(tlsf_block_t) - 1));
+*/
+
 TLSF_STATIC_ASSERT(sizeof(size_t) == 4 || sizeof(size_t) == 8,
                    "size_t must be 32 or 64 bit");
 TLSF_STATIC_ASSERT(sizeof(size_t) == sizeof(void *),
                    "size_t must equal pointer size");
+TLSF_STATIC_ASSERT(offsetof(tlsf_block_t, header) == BLOCK_HEADER_OFFSET,
+                   "unexpected block header offset");
 TLSF_STATIC_ASSERT(ALIGN_SIZE == BLOCK_SIZE_SMALL / SL_COUNT,
                    "sizes are not properly set");
 TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN < BLOCK_SIZE_SMALL,
@@ -189,6 +226,11 @@ void *tlsf_resize_default(tlsf_t *t, size_t size)
 #endif
 #endif
 
+/*@
+  requires x != 0;
+  assigns \nothing;
+  ensures \result < 32;
+*/
 INLINE uint32_t bitmap_ffs(uint32_t x)
 {
     ASSERT(x, "no set bit found");
@@ -217,6 +259,11 @@ INLINE uint32_t bitmap_ffs(uint32_t x)
 #endif
 }
 
+/*@
+  requires x > 0;
+  assigns \nothing;
+  ensures \result < _TLSF_SIZE_WIDTH;
+*/
 INLINE uint32_t log2floor(size_t x)
 {
     ASSERT(x > 0, "log2 of zero");
@@ -268,33 +315,110 @@ INLINE uint32_t log2floor(size_t x)
 #endif
 }
 
+/*@
+  requires tlsf_aligned_header(block);
+  assigns \nothing;
+  ensures \result == block->header - block->header % ALIGN_SIZE;
+  ensures \result % ALIGN_SIZE == 0;
+  ensures \result <= block->header;
+  ensures block->header - \result <= BLOCK_BITS;
+*/
 INLINE size_t block_size(const tlsf_block_t *block)
 {
-    return block->header & ~BLOCK_BITS;
+    return block->header - block->header % ALIGN_SIZE;
 }
 
+/*@
+  requires \valid(block);
+  requires tlsf_aligned_header(block);
+  requires size % ALIGN_SIZE == 0;
+  requires size <= SIZE_MAX - BLOCK_BITS;
+  assigns block->header;
+  ensures block->header == size + \old(block->header) % ALIGN_SIZE;
+  ensures block->header - block->header % ALIGN_SIZE == size;
+  ensures tlsf_aligned_header(block);
+*/
 INLINE void block_set_size(tlsf_block_t *block, size_t size)
 {
     ASSERT(!(size % ALIGN_SIZE), "invalid size");
-    block->header = size | (block->header & BLOCK_BITS);
+    block->header = size + block->header % ALIGN_SIZE;
 }
 
+/*@
+  requires \valid(block);
+  requires tlsf_aligned_header(block);
+  requires size % ALIGN_SIZE == 0;
+  requires size <= SIZE_MAX - block->header;
+  assigns block->header;
+  ensures block->header == \old(block->header) + size;
+  ensures tlsf_aligned_header(block);
+*/
+INLINE void block_add_size(tlsf_block_t *block, size_t size)
+{
+    block->header += size;
+}
+
+/*@
+  requires \valid(block);
+  requires \valid(rest);
+  requires \separated(block, rest);
+  requires tlsf_aligned_header(block);
+  requires size % ALIGN_SIZE == 0;
+  requires rest_size % ALIGN_SIZE == 0;
+  requires size <= SIZE_MAX - BLOCK_BITS;
+  assigns block->header, rest->header;
+  ensures rest->header == rest_size;
+  ensures block->header - block->header % ALIGN_SIZE == size;
+  ensures tlsf_aligned_header(block);
+  ensures tlsf_aligned_header(rest);
+*/
+INLINE void block_split_headers(tlsf_block_t *block,
+                                tlsf_block_t *rest,
+                                size_t size,
+                                size_t rest_size)
+{
+    rest->header = rest_size;
+    block_set_size(block, size);
+}
+
+/*@
+  requires \valid_read(block);
+  assigns \nothing;
+  ensures \result <==> block->header % 2 != 0;
+*/
 INLINE bool block_is_free(const tlsf_block_t *block)
 {
-    return !!(block->header & BLOCK_BIT_FREE);
+    return block->header % 2 != 0;
 }
 
+/*@
+  requires \valid_read(block);
+  assigns \nothing;
+  ensures \result <==> (block->header / BLOCK_BIT_PREV_FREE) % 2 != 0;
+*/
 INLINE bool block_is_prev_free(const tlsf_block_t *block)
 {
-    return !!(block->header & BLOCK_BIT_PREV_FREE);
+    return (block->header / BLOCK_BIT_PREV_FREE) % 2 != 0;
 }
 
+/*@
+  requires \valid(block);
+  requires tlsf_aligned_header(block);
+  assigns block->header;
+  ensures tlsf_aligned_header(block);
+  ensures block->header - block->header % ALIGN_SIZE ==
+            \old(block->header) - \old(block->header) % ALIGN_SIZE;
+  ensures free ==> (block->header / BLOCK_BIT_PREV_FREE) % 2 != 0;
+  ensures !free ==> (block->header / BLOCK_BIT_PREV_FREE) % 2 == 0;
+*/
 INLINE void block_set_prev_free(tlsf_block_t *block, bool free)
 {
-    block->header = free ? block->header | BLOCK_BIT_PREV_FREE
-                         : block->header & ~BLOCK_BIT_PREV_FREE;
+    size_t flags = block->header % ALIGN_SIZE;
+    block->header = block->header - flags + flags % BLOCK_BIT_PREV_FREE +
+                    (free ? BLOCK_BIT_PREV_FREE : 0);
 }
 
+/*@ assigns \nothing; */
 INLINE size_t align_up(size_t x, size_t align)
 {
     ASSERT(align, "alignment must be non-zero");
@@ -314,6 +438,7 @@ INLINE size_t align_up(size_t x, size_t align)
  *
  * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
  */
+/*@ assigns \result \from p, align; */
 INLINE char *align_ptr(char *p, size_t align)
 {
     uintptr_t addr = (uintptr_t) p;
@@ -321,11 +446,13 @@ INLINE char *align_ptr(char *p, size_t align)
     return p + (aligned_addr - addr);
 }
 
+/*@ assigns \result \from block; */
 INLINE char *block_payload(tlsf_block_t *block)
 {
-    return (char *) block + offsetof(tlsf_block_t, header) + BLOCK_OVERHEAD;
+    return (char *) block + BLOCK_HEADER_OFFSET + BLOCK_OVERHEAD;
 }
 
+/*@ assigns \result \from ptr; */
 INLINE tlsf_block_t *to_block(void *ptr)
 {
     tlsf_block_t *block = (tlsf_block_t *) ptr;
@@ -334,6 +461,11 @@ INLINE tlsf_block_t *to_block(void *ptr)
     return block;
 }
 
+/*@
+  requires \valid((char *)ptr - BLOCK_HEADER_OFFSET - BLOCK_OVERHEAD +
+                  (0 .. sizeof(size_t) - 1));
+  assigns \result \from ptr;
+*/
 INLINE tlsf_block_t *block_from_payload(void *ptr)
 {
     return to_block((char *) ptr - offsetof(tlsf_block_t, header) -
@@ -347,6 +479,9 @@ INLINE tlsf_block_t *block_from_payload(void *ptr)
  * unpoison the full payload first: after block_absorb merges two blocks, the
  * old safe region may carry stale ASan shadow.
  */
+/*@
+  requires tlsf_aligned_header(block);
+*/
 INLINE void block_poison_free(tlsf_block_t *block)
 {
     size_t bsize = block_size(block);
@@ -360,6 +495,12 @@ INLINE void block_poison_free(tlsf_block_t *block)
 }
 
 /* Return location of previous block. */
+/*@
+  requires tlsf_aligned_header(block);
+  requires (block->header / BLOCK_BIT_PREV_FREE) % 2 != 0;
+  assigns \result \from block->prev;
+  ensures \result == block->prev;
+*/
 INLINE tlsf_block_t *block_prev(const tlsf_block_t *block)
 {
     ASSERT(block_is_prev_free(block), "previous block must be free");
@@ -367,23 +508,68 @@ INLINE tlsf_block_t *block_prev(const tlsf_block_t *block)
 }
 
 /* Return location of next existing block. */
+/*@
+  requires tlsf_next_header_span(block);
+  requires tlsf_aligned_header(block);
+  assigns \result \from block, block->header;
+*/
 INLINE tlsf_block_t *block_next(tlsf_block_t *block)
 {
-    tlsf_block_t *next =
-        to_block(block_payload(block) + block_size(block) - BLOCK_OVERHEAD);
-    ASSERT(block_size(block), "block is last");
+    size_t size = block_size(block);
+    ASSERT(size >= BLOCK_OVERHEAD, "block is last");
+    tlsf_block_t *next = to_block(block_payload(block) + size - BLOCK_OVERHEAD);
     return next;
+}
+
+/*@
+  requires \valid(next);
+  assigns next->prev \from block;
+  ensures next->prev == block;
+*/
+INLINE void block_link(tlsf_block_t *block, tlsf_block_t *next)
+{
+    next->prev = block;
+}
+
+/*@
+  requires \valid(prev);
+  requires \valid(next);
+  requires prev == next || \separated(prev, next);
+  requires tlsf_aligned_header(prev);
+  requires size % ALIGN_SIZE == 0;
+  requires size <= SIZE_MAX - prev->header;
+  assigns prev->header \from prev->header, size;
+  assigns next->prev \from prev;
+  assigns \result \from prev;
+  ensures \result == prev;
+  ensures prev->header == \old(prev->header) + size;
+  ensures next->prev == prev;
+  ensures tlsf_aligned_header(prev);
+*/
+INLINE tlsf_block_t *block_absorb_at(tlsf_block_t *prev,
+                                     tlsf_block_t *next,
+                                     size_t size)
+{
+    block_add_size(prev, size);
+    block_link(prev, next);
+    return prev;
 }
 
 /* Link a new block with its neighbor, return the neighbor. */
 INLINE tlsf_block_t *block_link_next(tlsf_block_t *block)
 {
     tlsf_block_t *next = block_next(block);
-    next->prev = block;
+    block_link(block, next);
     return next;
 }
 
-INLINE bool block_can_split(const tlsf_block_t *block, size_t size)
+/*@
+  requires tlsf_aligned_header(block);
+  requires size <= SIZE_MAX - sizeof(tlsf_block_t);
+  assigns \nothing;
+  ensures \result ==> block->header >= sizeof(tlsf_block_t) + size;
+*/
+MAYBE_UNUSED INLINE bool block_can_split(const tlsf_block_t *block, size_t size)
 {
     return block_size(block) >= sizeof(tlsf_block_t) + size;
 }
@@ -391,17 +577,65 @@ INLINE bool block_can_split(const tlsf_block_t *block, size_t size)
 /* When trimming, require the remainder to be at least TLSF_SPLIT_THRESHOLD to
  * avoid creating tiny free blocks that waste metadata overhead.
  */
+/*@
+  requires tlsf_aligned_header(block);
+  requires size <= SIZE_MAX - BLOCK_OVERHEAD - TLSF_SPLIT_THRESHOLD;
+  assigns \nothing;
+  ensures \result ==>
+            block->header >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
+*/
 INLINE bool block_can_trim(const tlsf_block_t *block, size_t size)
 {
     return block_size(block) >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
 }
 
+/* The flag nibble is header % ALIGN_SIZE: bit 0 is FREE, bit 1 is PREV_FREE.
+ * Both setters strip the nibble, keep the bit they do not own, and re-add
+ * theirs, so the size part is untouched. Compilers fold this back to the same
+ * single and/orr pair as the equivalent bit twiddling.
+ */
+/*@
+  requires \valid(block);
+  requires tlsf_aligned_header(block);
+  assigns block->header;
+  ensures tlsf_aligned_header(block);
+  ensures block->header - block->header % ALIGN_SIZE ==
+            \old(block->header) - \old(block->header) % ALIGN_SIZE;
+  ensures free ==> block->header % 2 != 0;
+  ensures !free ==> block->header % 2 == 0;
+*/
+INLINE void block_set_free_bit(tlsf_block_t *block, bool free)
+{
+    size_t flags = block->header % ALIGN_SIZE;
+    block->header = block->header - flags +
+                    flags / BLOCK_BIT_PREV_FREE * BLOCK_BIT_PREV_FREE +
+                    (free ? BLOCK_BIT_FREE : 0);
+}
+
+/*@
+  requires \valid(block);
+  requires \valid(next);
+  requires tlsf_aligned_header(block);
+  requires tlsf_aligned_header(next);
+  requires \separated(block, next);
+  assigns block->header, next->header;
+  ensures free ==> block->header % 2 != 0;
+  ensures !free ==> block->header % 2 == 0;
+  ensures free ==> (next->header / BLOCK_BIT_PREV_FREE) % 2 != 0;
+  ensures !free ==> (next->header / BLOCK_BIT_PREV_FREE) % 2 == 0;
+*/
+INLINE void block_set_free_at(tlsf_block_t *block,
+                              tlsf_block_t *next,
+                              bool free)
+{
+    block_set_free_bit(block, free);
+    block_set_prev_free(next, free);
+}
+
 INLINE void block_set_free(tlsf_block_t *block, bool free)
 {
     ASSERT(block_is_free(block) != free, "block free bit unchanged");
-    block->header =
-        free ? block->header | BLOCK_BIT_FREE : block->header & ~BLOCK_BIT_FREE;
-    block_set_prev_free(block_link_next(block), free);
+    block_set_free_at(block, block_link_next(block), free);
 }
 
 /* Adjust allocation size to be aligned, and no smaller than internal minimum.
@@ -409,6 +643,10 @@ INLINE void block_set_free(tlsf_block_t *block, bool free)
  * computes (((x-1) | (align-1)) + 1), which wraps to 0 when x is near SIZE_MAX,
  * bypassing subsequent TLSF_MAX_SIZE checks.
  */
+/*@
+  assigns \nothing;
+  ensures size > TLSF_MAX_SIZE ==> \result == size;
+*/
 INLINE size_t adjust_size(size_t size, size_t align)
 {
     if (UNLIKELY(size > TLSF_MAX_SIZE))
@@ -421,6 +659,12 @@ INLINE size_t adjust_size(size_t size, size_t align)
  * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
  * large sizes, it rounds up to the next second-level bin boundary.
  */
+/*@
+  requires size > 0;
+  requires size <= TLSF_MAX_SIZE;
+  requires size % ALIGN_SIZE == 0;
+  assigns \nothing;
+*/
 INLINE size_t round_block_size(size_t size)
 {
     uint32_t lg = log2floor(size);
@@ -443,6 +687,14 @@ INLINE size_t round_block_size(size_t size)
  * in-order cores (e.g., Cortex-M) where branch misprediction stalls the
  * pipeline.
  */
+/*@
+  requires size > 0;
+  requires size <= TLSF_MAX_SIZE;
+  requires \valid(fl);
+  requires \valid(sl);
+  requires \separated(fl, sl);
+  assigns *fl, *sl;
+*/
 INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
 {
     uint32_t t = log2floor(size);
@@ -507,6 +759,42 @@ INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
     return t->block[*fl][*sl];
 }
 
+/*@
+  requires \valid(t);
+  requires fl < FL_COUNT;
+  requires sl < SL_COUNT;
+  assigns t->block[fl][sl] \from block;
+  ensures t->block[fl][sl] == block;
+*/
+INLINE void bin_set_head(tlsf_t *t,
+                         uint32_t fl,
+                         uint32_t sl,
+                         tlsf_block_t *block)
+{
+    t->block[fl][sl] = block;
+}
+
+/* prev and next may be the same block (a bin holding one entry, or the sentinel
+ * absorbing writes). prev_free and next_free are distinct fields, so the two
+ * stores never alias and the aliased case needs no special handling: it writes
+ * the block's own two links back to itself, which is what an empty list means
+ * here.
+ */
+/*@
+  requires \valid(prev);
+  requires \valid(next);
+  requires prev == next || \separated(prev, next);
+  assigns next->prev_free \from prev;
+  assigns prev->next_free \from next;
+  ensures next->prev_free == prev;
+  ensures prev->next_free == next;
+*/
+INLINE void free_list_unlink(tlsf_block_t *prev, tlsf_block_t *next)
+{
+    next->prev_free = prev;
+    prev->next_free = next;
+}
+
 /* Remove a free block from the free list. Unconditional writes: prev/next may
  * be &t->block_null (sentinel), in which case the writes are harmless.
  */
@@ -520,12 +808,11 @@ INLINE void remove_free_block(tlsf_t *t,
 
     tlsf_block_t *prev = block->prev_free;
     tlsf_block_t *next = block->next_free;
-    next->prev_free = prev;
-    prev->next_free = next;
+    free_list_unlink(prev, next);
 
     /* If this block is the head of the free list, set new head. */
     if (t->block[fl][sl] == block) {
-        t->block[fl][sl] = next;
+        bin_set_head(t, fl, sl, next);
 
         /* If the new head is the sentinel, the bin is empty. */
         if (next == &t->block_null) {
@@ -536,6 +823,28 @@ INLINE void remove_free_block(tlsf_t *t,
                 t->fl &= ~(1U << fl);
         }
     }
+}
+
+/*@
+  requires \valid(block);
+  requires \valid(current);
+  requires \valid(sentinel);
+  requires \separated(block, current);
+  requires \separated(block, sentinel);
+  assigns block->next_free \from current;
+  assigns block->prev_free \from sentinel;
+  assigns current->prev_free \from block;
+  ensures block->next_free == current;
+  ensures block->prev_free == sentinel;
+  ensures current->prev_free == block;
+*/
+INLINE void free_list_link(tlsf_block_t *block,
+                           tlsf_block_t *current,
+                           tlsf_block_t *sentinel)
+{
+    block->next_free = current;
+    block->prev_free = sentinel;
+    current->prev_free = block;
 }
 
 /* Insert a free block into the free block list and mark the bitmaps.
@@ -549,10 +858,8 @@ INLINE void insert_free_block(tlsf_t *t,
 {
     tlsf_block_t *current = t->block[fl][sl];
     ASSERT(block, "cannot insert a null entry into the free list");
-    block->next_free = current;
-    block->prev_free = &t->block_null;
-    current->prev_free = block;
-    t->block[fl][sl] = block;
+    free_list_link(block, current, &t->block_null);
+    bin_set_head(t, fl, sl, block);
     t->fl |= 1U << fl;
     t->sl[fl] |= 1U << sl;
 }
@@ -581,24 +888,31 @@ INLINE tlsf_block_t *block_split(tlsf_block_t *block, size_t size)
     ASSERT(block_size(block) == rest_size + size + BLOCK_OVERHEAD,
            "rest block size is wrong");
     ASSERT(rest_size >= BLOCK_SIZE_MIN, "block split with invalid size");
-    rest->header = rest_size;
+    block_split_headers(block, rest, size, rest_size);
     ASSERT(!(rest_size % ALIGN_SIZE), "invalid block size");
     block_set_free(rest, true);
-    block_set_size(block, size);
 
     block_poison_free(rest);
 
     return rest;
 }
 
-/* Absorb a free block's storage into an adjacent previous free block. */
-INLINE tlsf_block_t *block_absorb(tlsf_block_t *prev, const tlsf_block_t *block)
+/* Absorb a free block's storage into an adjacent previous free block. `block`
+ * is not const: its successor is resolved through it, and that successor is
+ * then written. Taking it const would only move a const-discarding cast inside.
+ *
+ * Resolving next from `block` before growing `prev` (rather than from `prev`
+ * after, as the size arithmetic would also allow) keeps the successor lookup
+ * off a header that is mid-update. The two agree only because a block's
+ * successor sits at `block + BLOCK_HEADER_OFFSET + block_size(block)` and
+ * BLOCK_HEADER_OFFSET == BLOCK_OVERHEAD, which the static assert above pins.
+ */
+INLINE tlsf_block_t *block_absorb(tlsf_block_t *prev, tlsf_block_t *block)
 {
     ASSERT(block_size(prev), "previous block can't be last");
-    /* Note: Leaves flags untouched. */
-    prev->header += block_size(block) + BLOCK_OVERHEAD;
-    block_link_next(prev);
-    return prev;
+    size_t size = block_size(block) + BLOCK_OVERHEAD;
+    tlsf_block_t *next = block_next(block);
+    return block_absorb_at(prev, next, size);
 }
 
 /* Merge a just-freed block with an adjacent previous free block. */
@@ -677,6 +991,10 @@ INLINE void *block_use(tlsf_t *t, tlsf_block_t *block, size_t size)
     return block_payload(block);
 }
 
+/*@
+  requires tlsf_aligned_header(block);
+  assigns \nothing;
+*/
 INLINE void check_sentinel(tlsf_block_t *block)
 {
     (void) block;
@@ -688,11 +1006,46 @@ INLINE void check_sentinel(tlsf_block_t *block)
  * insert/remove can write unconditionally without a NULL check. Cost is a fixed
  * O(FL_COUNT * SL_COUNT) regardless of how much is allocated.
  */
+/*@
+  requires \valid(t);
+  assigns t->fl, t->sl[0 .. FL_COUNT - 1];
+  assigns t->block[0 .. FL_COUNT - 1][0 .. SL_COUNT - 1] \from t;
+  ensures tlsf_empty_bins(t);
+  ensures t->fl == 0;
+  ensures \forall integer i; 0 <= i < FL_COUNT ==> t->sl[i] == 0;
+  ensures \forall integer i, j;
+            0 <= i < FL_COUNT && 0 <= j < SL_COUNT ==>
+              t->block[i][j] == &t->block_null;
+*/
 static void bins_reset(tlsf_t *t)
 {
     t->fl = 0;
-    memset(t->sl, 0, sizeof(t->sl));
+    /*@
+      loop invariant 0 <= i <= FL_COUNT;
+      loop invariant \forall integer k; 0 <= k < i ==> t->sl[k] == 0;
+      loop assigns i, t->sl[0 .. FL_COUNT - 1];
+      loop variant FL_COUNT - i;
+    */
     for (uint32_t i = 0; i < FL_COUNT; i++)
+        t->sl[i] = 0;
+    /*@
+      loop invariant 0 <= i <= FL_COUNT;
+      loop invariant t->fl == 0;
+      loop invariant \forall integer k; 0 <= k < FL_COUNT ==> t->sl[k] == 0;
+      loop invariant \forall integer k, j;
+        0 <= k < i && 0 <= j < SL_COUNT ==>
+          t->block[k][j] == &t->block_null;
+      loop assigns i, t->block[0 .. FL_COUNT - 1][0 .. SL_COUNT - 1];
+      loop variant FL_COUNT - i;
+    */
+    for (uint32_t i = 0; i < FL_COUNT; i++)
+        /*@
+          loop invariant 0 <= j <= SL_COUNT;
+          loop invariant \forall integer k; 0 <= k < j ==>
+            t->block[i][k] == &t->block_null;
+          loop assigns j, t->block[i][0 .. SL_COUNT - 1];
+          loop variant SL_COUNT - j;
+        */
         for (uint32_t j = 0; j < SL_COUNT; j++)
             t->block[i][j] = &t->block_null;
 }

@@ -6,11 +6,15 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   coding-style:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install formatting tools
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg
@@ -25,7 +29,6 @@ jobs:
         run: bash .ci/check-newline.sh
 
   build-and-test:
-    needs: coding-style
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
@@ -74,6 +77,9 @@ jobs:
           # and split-threshold paths rot untested.
           - runner: ubuntu-24.04
             cc: gcc
+            # These two entries are what exercise tests/test.c's pool ceiling
+            # test; it self-skips in unconstrained builds where the ceiling
+            # exceeds allocatable memory.
             cflags: "-DTLSF_MAX_POOL_BITS=20"
           - runner: ubuntu-24.04
             cc: clang
@@ -91,7 +97,7 @@ jobs:
             cc: clang
             cflags: "-DTLSF_NO_INTRINSICS -fsanitize=address,undefined"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build
         run: make all
         env:
@@ -106,11 +112,10 @@ jobs:
   # 32-bit build: exercises the _TLSF_SIZE_WIDTH == 32 paths (ALIGN_SHIFT 2,
   # _TLSF_FL_MAX 31, __builtin_clzl) that the 64-bit matrix never compiles.
   build-32bit:
-    needs: coding-style
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install multilib toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib
         env:
@@ -124,12 +129,26 @@ jobs:
         env:
           CFLAGS: "-m32"
 
+  # Deductive verification of the annotated leaf helpers. Runs in the official
+  # Frama-C image so the job does not pay for an opam build on every push.
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: framac/frama-c:32.1
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+      - name: Frama-C WP
+        run: |
+          chown -R opam:opam "$GITHUB_WORKSPACE"
+          su -s /bin/sh opam -c 'opam exec -- make verify'
+
   build-windows-msvc:
-    needs: coding-style
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
       - name: Compile Single-Threaded TLSF with MSVC
@@ -146,7 +165,6 @@ jobs:
           .\test_thread.exe
   
   wcet:
-    needs: [coding-style, build-and-test]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
@@ -158,7 +176,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y python3-matplotlib
         env:
@@ -181,22 +199,57 @@ jobs:
             echo ""
             echo "Box plot and histogram available in the **wcet-${{ matrix.arch }}** artifact."
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Comment on PR
-        if: >-
-          always() && github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository
+      - name: Upload WCET artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wcet-${{ matrix.arch }}
+          path: |
+            build/wcet_output.txt
+            build/wcet_raw.csv
+            build/wcet_boxplot.png
+            build/wcet_histogram.png
+
+  wcet-pr-summary:
+    needs: wcet
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Download WCET artifacts
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: wcet-*
+          path: artifacts
+          merge-multiple: false
+      - name: Update consolidated PR comment
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          MARKER="<!-- wcet-${{ matrix.arch }} -->"
+          MARKER="<!-- wcet-summary -->"
           {
             echo "$MARKER"
-            echo "## WCET Results (${{ matrix.arch }})"
-            echo ""
-            echo '```'
-            cat build/wcet_output.txt 2>/dev/null || echo "WCET measurement failed or was skipped."
-            echo '```'
+            echo "## WCET Results"
+            for arch in x86-64 arm64; do
+              output="artifacts/wcet-$arch/wcet_output.txt"
+              echo ""
+              echo "### $arch"
+              echo '```'
+              cat "$output" 2>/dev/null || echo "WCET measurement failed or was skipped."
+              echo '```'
+            done
           } > /tmp/comment.md
+
+          for marker in '<!-- wcet-x86-64 -->' '<!-- wcet-arm64 -->'; do
+            gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+              --paginate --jq ".[] | select(.body | startswith(\"$marker\")) | .id" |
+              xargs -r -n1 -I{} gh api "repos/${{ github.repository }}/issues/comments/{}" -X DELETE
+          done
 
           COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -1)
@@ -205,14 +258,6 @@ jobs:
             gh api "repos/${{ github.repository }}/issues/comments/$COMMENT_ID" \
               -X PATCH -F body=@/tmp/comment.md
           else
-            gh pr comment "${{ github.event.pull_request.number }}" -F /tmp/comment.md
+            gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+              -X POST -F body=@/tmp/comment.md
           fi
-      - name: Upload WCET artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wcet-${{ matrix.arch }}
-          path: |
-            build/wcet_raw.csv
-            build/wcet_boxplot.png
-            build/wcet_histogram.png
