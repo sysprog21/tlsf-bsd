@@ -536,6 +536,25 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* -p bypasses DEFAULT_POOL_SIZE's clamp, and a build with a reduced
+     * TLSF_MAX_POOL_BITS caps how large a pool tlsf_pool_init() will accept.
+     * Probe once here so an oversized -p reports the reason, instead of
+     * aborting on an opaque assertion inside a measurement loop.
+     */
+    {
+        tlsf_t probe;
+        if (!tlsf_pool_init(&probe, pool, pool_size)) {
+            fprintf(stderr,
+                    "Error: tlsf_pool_init rejected a %zu byte pool; this "
+                    "build accepts at most %zu bytes "
+                    "(TLSF_MAX_POOL_BYTES, set by TLSF_MAX_POOL_BITS=%d)\n",
+                    pool_size, (size_t) TLSF_MAX_POOL_BYTES, _TLSF_FL_MAX);
+            free(pool);
+            free(samples);
+            return 1;
+        }
+    }
+
     if (cold_cache) {
         thrash_buf = (char *) malloc(THRASH_SIZE);
         if (!thrash_buf) {

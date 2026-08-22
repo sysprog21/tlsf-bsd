@@ -68,6 +68,17 @@ extern "C" {
 #endif
 #define _TLSF_FL_COUNT (_TLSF_FL_MAX - _TLSF_FL_SHIFT + 1)
 #define TLSF_MAX_SIZE (((size_t) 1 << (_TLSF_FL_MAX - 1)) - sizeof(size_t))
+
+/* Largest region tlsf_pool_init() accepts, for an ALIGN_SIZE-aligned pointer.
+ * The pool's single initial free block cannot exceed 2^(_TLSF_FL_MAX - 1)
+ * bytes, and the pool also carries that block's header and a sentinel.
+ *
+ * A region is accepted when its size, rounded down to the alignment, is at
+ * most this; a few trailing bytes past it are tolerated and ignored. Note this
+ * is about half of 2^_TLSF_FL_MAX, which bounds a *dynamic* arena instead.
+ */
+#define TLSF_MAX_POOL_BYTES \
+    (((size_t) 1 << (_TLSF_FL_MAX - 1)) + 2 * sizeof(size_t))
 #define TLSF_INIT ((tlsf_t) {.size = 0})
 
 /* TLSF_INIT_STATIC is need to be used instead of TLSF_INIT for initializing

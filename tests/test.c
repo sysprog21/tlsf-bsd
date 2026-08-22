@@ -907,6 +907,50 @@ static void pool_utilization_test(void)
     printf(" done\n");
 }
 
+/* TLSF_MAX_POOL_BYTES must equal what tlsf_pool_init() actually accepts.
+ *
+ * A _Static_assert cannot establish this. The macro and the internal block
+ * constants are definitionally the same expression, so asserting they are
+ * equal is a tautology that survives any drift in the acceptance logic itself:
+ * a different overhead-word count, a changed alignment round-down, an extra
+ * sentinel. Only calling the function pins the published ceiling to reality.
+ *
+ * The ceiling is 256 GiB in the default configuration, far past what can be
+ * backed with memory, so the boundary is exercised under a reduced
+ * TLSF_MAX_POOL_BITS. CI covers 20 and 24.
+ */
+static void pool_ceiling_test(void)
+{
+    printf("Pool ceiling test: ");
+    fflush(stdout);
+
+    if (TLSF_MAX_POOL_BYTES > (size_t) 64 << 20) {
+        printf(
+            "skipped (ceiling %zu bytes exceeds what we can allocate; "
+            "build with -DTLSF_MAX_POOL_BITS=24 or less to cover it)\n",
+            (size_t) TLSF_MAX_POOL_BYTES);
+        return;
+    }
+
+    /* One extra alignment step so the reject case has memory behind it. */
+    const size_t align = sizeof(void *);
+    char *mem = (char *) malloc(TLSF_MAX_POOL_BYTES + align);
+    assert(mem);
+    assert((size_t) mem % align == 0); /* else adj shifts the boundary */
+
+    tlsf_t t;
+    size_t at = tlsf_pool_init(&t, mem, TLSF_MAX_POOL_BYTES);
+    assert(at > 0); /* the published ceiling must be accepted */
+    tlsf_check(&t);
+
+    size_t over = tlsf_pool_init(&t, mem, TLSF_MAX_POOL_BYTES + align);
+    assert(over == 0); /* and one alignment step past it must not be */
+
+    free(mem);
+    printf("%zu accepted, +%zu rejected\n", (size_t) TLSF_MAX_POOL_BYTES,
+           align);
+}
+
 /* Issue #4: a freed block must land in the bin that a same-size request will
  * search, so free-then-reallocate at the same size reuses the same address.
  * Guards against a future change that searches with the rounded size but
@@ -1114,6 +1158,9 @@ int main(void)
 
     /* Run free/realloc address reuse test */
     reuse_same_address_test();
+
+    /* Run pool ceiling test */
+    pool_ceiling_test();
 
     puts("OK!");
     return 0;
