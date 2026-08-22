@@ -180,8 +180,6 @@ TLSF_STATIC_ASSERT(sizeof(size_t) == sizeof(void *),
                    "size_t must equal pointer size");
 TLSF_STATIC_ASSERT(offsetof(tlsf_block_t, header) == BLOCK_HEADER_OFFSET,
                    "unexpected block header offset");
-TLSF_STATIC_ASSERT(_TLSF_PAYLOAD_OFFSET == BLOCK_HEADER_OFFSET + BLOCK_OVERHEAD,
-                   "public payload offset does not match block layout");
 TLSF_STATIC_ASSERT(ALIGN_SIZE == BLOCK_SIZE_SMALL / SL_COUNT,
                    "sizes are not properly set");
 TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN < BLOCK_SIZE_SMALL,
@@ -483,7 +481,6 @@ INLINE tlsf_block_t *block_from_payload(void *ptr)
  */
 /*@
   requires tlsf_aligned_header(block);
-  assigns \nothing;
 */
 INLINE void block_poison_free(tlsf_block_t *block)
 {

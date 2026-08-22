@@ -95,7 +95,7 @@ verify:
 		exit 1; \
 	}
 	@output="$$($(FRAMAC) -cpp-extra-args='-Iinclude -DTLSF_ENABLE_CHECK' \
-		-wp -wp-rte -wp-model Typed+nocast -wp-prover Alt-Ergo,Z3 -wp-timeout 40 \
+		-wp -wp-rte -wp-model Typed+nocast -wp-prover Alt-Ergo -wp-timeout 40 \
 		-wp-fct='$(WP_FUNCTIONS)' src/tlsf.c 2>&1)"; \
 	status=$$?; \
 	printf '%s\n' "$$output"; \

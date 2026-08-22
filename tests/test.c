@@ -895,9 +895,9 @@ static void pool_utilization_test(void)
         }
         tlsf_check(&t);
 
-        /* Every allocation costs a header and is rounded up to a bin
-         * boundary, so exact capacity is not predictable. Anything below half
-         * the pool means blocks are being inflated, not merely rounded.
+        /* Every allocation costs a header and is rounded up to a bin boundary,
+         * so exact capacity is not predictable. Anything below half the pool
+         * means blocks are being inflated, not merely rounded.
          */
         assert(n > 1);
         assert(handed_out > usable / 2);
@@ -910,9 +910,9 @@ static void pool_utilization_test(void)
 /* TLSF_MAX_POOL_BYTES must equal what tlsf_pool_init() actually accepts.
  *
  * A _Static_assert cannot establish this. The macro and the internal block
- * constants are definitionally the same expression, so asserting they are
- * equal is a tautology that survives any drift in the acceptance logic itself:
- * a different overhead-word count, a changed alignment round-down, an extra
+ * constants are definitionally the same expression, so asserting they are equal
+ * is a tautology that survives any drift in the acceptance logic itself: a
+ * different overhead-word count, a changed alignment round-down, an extra
  * sentinel. Only calling the function pins the published ceiling to reality.
  *
  * The ceiling is 256 GiB in the default configuration, far past what can be
@@ -953,9 +953,9 @@ static void pool_ceiling_test(void)
 
 /* Issue #4: a freed block must land in the bin that a same-size request will
  * search, so free-then-reallocate at the same size reuses the same address.
- * Guards against a future change that searches with the rounded size but
- * stores the block at the unrounded one. The block under test is sandwiched
- * between live allocations so it cannot coalesce and mask the result.
+ * Guards against a future change that searches with the rounded size but stores
+ * the block at the unrounded one. The block under test is sandwiched between
+ * live allocations so it cannot coalesce and mask the result.
  */
 static void reuse_same_address_test(void)
 {

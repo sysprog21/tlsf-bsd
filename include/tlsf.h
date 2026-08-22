@@ -160,21 +160,14 @@ typedef struct {
     struct tlsf_block block_null; /* Free-list sentinel (absorbs writes) */
 } tlsf_t;
 
-/* Bytes of block metadata preceding a payload pointer: the prev field and the
- * header word. This is the one place the layout is written down for the public
- * contracts below; src/tlsf.c static-asserts that it matches the real block.
- */
-#define _TLSF_PAYLOAD_OFFSET (sizeof(struct tlsf_block *) + sizeof(size_t))
-
-/* A pointer previously returned by tlsf_malloc/aalloc/realloc. Callers must
- * keep the block metadata that precedes the payload intact, because free and
- * realloc step backwards onto it before touching the payload itself.
+/* The header word immediately precedes a payload pointer. Its validity is the
+ * memory-safety condition shared by free and realloc; allocation ownership is
+ * a semantic caller obligation, documented on those functions.
  */
 /*@
-  predicate tlsf_allocated{L}(void *ptr) =
+  predicate tlsf_payload_header{L}(void *ptr) =
     \valid((char *)ptr) &&
-    \valid(((char *)ptr - _TLSF_PAYLOAD_OFFSET) +
-           (0 .. _TLSF_PAYLOAD_OFFSET - 1));
+    \valid(((char *)ptr - sizeof(size_t)) + (0 .. sizeof(size_t) - 1));
 */
 
 /**
@@ -225,7 +218,8 @@ void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size);
  */
 /*@
   requires \valid(tlsf);
-  requires mem != \null ==> \valid((char *)mem);
+  requires mem != \null && size != 0 ==>
+    \valid(((char *)mem) + (0 .. size - 1));
   ensures \result <= size;
 */
 size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
@@ -247,7 +241,8 @@ size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
  */
 /*@
   requires \valid(t);
-  requires mem != \null ==> \valid((char *)mem);
+  requires mem != \null && bytes != 0 ==>
+    \valid(((char *)mem) + (0 .. bytes - 1));
   ensures \result == 0 || t->fixed;
 */
 size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes);
@@ -289,7 +284,7 @@ void *tlsf_malloc(tlsf_t *t, size_t size);
 
 /*@
   requires \valid(t);
-  requires mem != \null ==> tlsf_allocated(mem);
+  requires mem != \null ==> tlsf_payload_header(mem);
   ensures \result == \null || \valid(((char *)\result) + (0 .. size - 1));
 */
 void *tlsf_realloc(tlsf_t *t, void *mem, size_t size);
@@ -299,7 +294,7 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size);
  */
 /*@
   requires \valid(t);
-  requires mem != \null ==> tlsf_allocated(mem);
+  requires mem != \null ==> tlsf_payload_header(mem);
 */
 void tlsf_free(tlsf_t *t, void *mem);
 
@@ -314,7 +309,7 @@ void tlsf_free(tlsf_t *t, void *mem);
  * Return Usable payload bytes, or 0 if ptr is NULL
  */
 /*@
-  requires ptr != \null ==> tlsf_allocated(ptr);
+  requires ptr != \null ==> tlsf_payload_header(ptr);
   ensures ptr == \null ==> \result == 0;
 */
 size_t tlsf_usable_size(void *ptr);
