@@ -127,7 +127,7 @@ jobs:
   build-windows-msvc:
     needs: coding-style
     runs-on: windows-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Setup MSVC Developer Command Prompt
