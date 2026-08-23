@@ -104,6 +104,18 @@ extern "C" {
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#if defined(__clang__) && (__clang_major__ >= 10)
+#define TLSF_THREAD_WIN_SRWLOCK
+#elif defined(_MSC_VER) && (_MSC_VER >= 1700)
+#define TLSF_THREAD_WIN_SRWLOCK
+#elif defined(__GNUC__) && (__GNUC__ >= 8) && (defined(__MINGW32__) || \
+    defined(__MINGW64__))
+#define TLSF_THREAD_WIN_SRWLOCK
+#elif defined(_WIN32_WINNT) && (_WIN32_WINNT >= 0x0600)
+#define TLSF_THREAD_WIN_SRWLOCK
+#else
+#define TLSF_THREAD_WIN_CRSECTION
+#endif
 #endif
 
 #if defined(USE_C11_THREADS)
@@ -114,7 +126,15 @@ extern "C" {
 #define TLSF_LOCK_ACQUIRE(l) mtx_lock((l))
 #define TLSF_LOCK_RELEASE(l) mtx_unlock((l))
 #define TLSF_LOCK_TRY(l) (mtx_trylock((l)) == thrd_success)
-#elif defined(TLSF_THREAD_WIN)
+#elif defined(TLSF_THREAD_WIN_SRWLOCK)
+#define TLSF_LOCK_T SRWLOCK
+#define TLSF_LOCK_INIT(l) (InitializeSRWLock((l)), 0)
+/* SRWLOCK is just a pointer - no need to destroy it */
+#define TLSF_LOCK_DESTROY(l)
+#define TLSF_LOCK_ACQUIRE(l) AcquireSRWLockExclusive((l))
+#define TLSF_LOCK_RELEASE(l) ReleaseSRWLockExclusive((l))
+#define TLSF_LOCK_TRY(l) (TryAcquireSRWLockExclusive((l)) != 0)
+#elif defined(TLSF_THREAD_WIN_CRSECTION)
 #define TLSF_LOCK_T CRITICAL_SECTION
 #define TLSF_LOCK_INIT(l) (InitializeCriticalSection((l)), 0)
 #define TLSF_LOCK_DESTROY(l) DeleteCriticalSection((l))
