@@ -104,16 +104,16 @@ extern "C" {
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#if defined(__clang__) && (__clang_major__ >= 10)
+#if defined(_WIN32_WINNT) && (_WIN32_WINNT >= 0x0600)
+#define TLSF_THREAD_WIN_SRWLOCK
+#elif defined(__clang__) && (__clang_major__ >= 10)
 #define TLSF_THREAD_WIN_SRWLOCK
 #elif defined(_MSC_VER) && (_MSC_VER >= 1700)
 #define TLSF_THREAD_WIN_SRWLOCK
 #elif defined(__GNUC__) && (__GNUC__ >= 8) && (defined(__MINGW32__) || \
     defined(__MINGW64__))
 #define TLSF_THREAD_WIN_SRWLOCK
-#elif defined(_WIN32_WINNT) && (_WIN32_WINNT >= 0x0600)
-#define TLSF_THREAD_WIN_SRWLOCK
-#else
+#elif
 #define TLSF_THREAD_WIN_CRSECTION
 #endif
 #endif
