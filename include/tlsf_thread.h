@@ -110,8 +110,8 @@ extern "C" {
 #define TLSF_THREAD_WIN_SRWLOCK
 #elif defined(_MSC_VER) && (_MSC_VER >= 1700)
 #define TLSF_THREAD_WIN_SRWLOCK
-#elif defined(__GNUC__) && (__GNUC__ >= 8) && (defined(__MINGW32__) || \
-    defined(__MINGW64__))
+#elif defined(__GNUC__) && (__GNUC__ >= 8) && \
+    (defined(__MINGW32__) || defined(__MINGW64__))
 #define TLSF_THREAD_WIN_SRWLOCK
 #elif
 #define TLSF_THREAD_WIN_CRSECTION
