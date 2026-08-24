@@ -165,7 +165,7 @@ jobs:
           .\test_thread.exe
       - name: Compile Benchmark TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\bench.c /Fe:bench_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\bench.c /Fe:bench_tlsf.exe /link Psapi.lib
       - name: Run Benchmark TLSF
         run: |
           .\bench_tlsf.exe
