@@ -124,21 +124,32 @@ static inline tick_t read_tick(void)
 #elif defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
 #define TICK_UNIT "ns"
 
+/* QPC frequency is fixed at boot, so cache it. Re-reading it on every timestamp
+ * would land inside the measured interval and inflate every sample.
+ *
+ * QPC typically ticks at 10 MHz, i.e. 100 ns granularity, which is coarser than
+ * a single malloc or free. Individual samples therefore quantize to 0 or 100
+ * ns; only aggregate percentiles over many iterations carry meaning here.
+ */
+static uint64_t qpc_frequency;
+
 static inline tick_t read_tick(void)
 {
+    if (!qpc_frequency) {
+        LARGE_INTEGER frequency;
+        QueryPerformanceFrequency(&frequency);
+        qpc_frequency = (uint64_t) frequency.QuadPart;
+    }
+
     LARGE_INTEGER count;
-    LARGE_INTEGER frequency;
-
     QueryPerformanceCounter(&count);
-    QueryPerformanceFrequency(&frequency);
 
-    uint64_t seconds = (uint64_t) (count.QuadPart / frequency.QuadPart);
-    uint64_t remainder = (uint64_t) (count.QuadPart % frequency.QuadPart);
+    uint64_t ticks = (uint64_t) count.QuadPart;
+    uint64_t seconds = ticks / qpc_frequency;
+    uint64_t remainder = ticks % qpc_frequency;
 
-    uint64_t nanoseconds =
-        (remainder * 1000000000ULL) / (uint64_t) frequency.QuadPart;
-
-    return (tick_t) ((seconds * 1000000000ULL) + nanoseconds);
+    return (tick_t) ((seconds * 1000000000ULL) +
+                     (remainder * 1000000000ULL) / qpc_frequency);
 }
 #else
 #define TICK_UNIT "ns"
@@ -565,6 +576,15 @@ int main(int argc, char **argv)
         default:
             usage(argv[0]);
         }
+    }
+
+    /* No positional arguments are accepted. Without this, tlsf_getopt() stops
+     * at the first non-option and every flag after it is silently dropped.
+     */
+    if (state.counter < argc) {
+        fprintf(stderr, "%s: unexpected argument -- '%s'\n", argv[0],
+                argv[state.counter]);
+        usage(argv[0]);
     }
 
     if (!iterations) {
