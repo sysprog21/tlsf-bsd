@@ -26,7 +26,7 @@ typedef struct {
 	int counter;
 } tlsf_getop_state;
 
-inline tlsf_command_option* tlsf_scan_options(tlsf_getop_state* state, char c)
+static inline tlsf_command_option* tlsf_scan_options(tlsf_getop_state* state, char c)
 {
 	for (int i = 0; i < state->num_options; i++) {
 		if (state->options[i].option == c) {
