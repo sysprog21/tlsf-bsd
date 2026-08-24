@@ -30,24 +30,29 @@ static size_t MAX_PAGES;
 static size_t curr_pages = 0;
 static void *start_addr = 0;
 
-#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
-size_t get_page_size(void)
+static inline size_t get_page_size(void)
 {
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     return (size_t) si.dwPageSize;
+#else
+    return (size_t)sysconf(_SC_PAGESIZE);
+#endif
 }
 
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
 void *tlsf_resize(tlsf_t *t, size_t req_size)
 {
     (void) t;
 
-    // This is analogue mmap with flag MAP_NORESERVE to VirtualAlloc with
-    // MEM_RESERVE
+    /* This is analogue mmap with flag MAP_NORESERVE to VirtualAlloc with
+     * MEM_RESERVE
+     */
     if (!start_addr) {
         start_addr = VirtualAlloc(NULL, MAX_PAGES * PAGE,
-                                  MEM_RESERVE,    // Only reserve address space
-                                  PAGE_READWRITE  // Rights for read and write
+                                  MEM_RESERVE,  /* Only reserve address space */
+                                  PAGE_READWRITE  /* Rights for read and write */
         );
         if (!start_addr)
             return NULL;
@@ -59,19 +64,20 @@ void *tlsf_resize(tlsf_t *t, size_t req_size)
 
     if (req_pages != curr_pages) {
         if (req_pages < curr_pages) {
-            // Analogue for madvise(..., MADV_DONTNEED) to VirtualFree with
-            // MEM_DECOMMIT Free physical memory (commit), with reserved
-            // addresses
+            /* Analogue for madvise(..., MADV_DONTNEED) to VirtualFree with
+             * MEM_DECOMMIT Free physical memory (commit), with reserved
+             * addresses
+             */ 
             VirtualFree((char *) start_addr + PAGE * req_pages,
                         (size_t) (curr_pages - req_pages) * PAGE,
-                        MEM_DECOMMIT  // physical pages to zero
+                        MEM_DECOMMIT /* physical pages to zero */
             );
         } else {
-            // Commit reserved memory
+            /* Commit reserved memory */
             void *commit_ptr =
-                VirtualAlloc(start_addr,  // base address is the same
+                VirtualAlloc(start_addr, /* base address is the same */
                              req_pages * PAGE,
-                             MEM_COMMIT,  // Commit new pages
+                             MEM_COMMIT, /* Commit new pages */
                              PAGE_READWRITE);
             if (!commit_ptr)
                 return NULL;
@@ -189,7 +195,7 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 #if defined(_MSC_VER)
 static int msvc_large_rand(void)
 {
-    // 1 billion random number for MSVC
+    /* 1 billion random number for MSVC */
     return (rand() << 15) | rand();
 }
 #endif
@@ -1109,11 +1115,7 @@ static void pool_reset_test(void)
 
 int main(void)
 {
-#ifdef _WIN32
     PAGE = get_page_size();
-#else
-    PAGE = (size_t) sysconf(_SC_PAGESIZE);
-#endif
 
     /* Virtual address space reservation for testing. 64-bit: 1GB is sufficient
      * and safe 32-bit: 128MB to avoid VA space exhaustion (user space is 2-3GB)
