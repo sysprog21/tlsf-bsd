@@ -23,8 +23,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <psapi.h>
 #include <windows.h>
+
+#include <psapi.h>
 #else
 #include <sys/resource.h>
 #include <unistd.h>
