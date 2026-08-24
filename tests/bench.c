@@ -58,9 +58,9 @@ static inline uint32_t xorshift32(void)
 }
 
 /* Maximum memory consumption in bytes in usage_bytes*/
-int get_systemmem_usage(uint64_t *usage_bytes)
+int get_systemmem_usage(uint64_t *usage_kbytes)
 {
-    if (!usage_bytes)
+    if (!usage_kbytes)
         return -1;
 
 #if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
@@ -70,9 +70,9 @@ int get_systemmem_usage(uint64_t *usage_bytes)
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(hProcess, &pmc, sizeof(pmc))) {
         /* PeakWorkingSetSize is ru_maxrss analogue in bytes */
-        *usage_bytes = (uint64_t) pmc.PeakWorkingSetSize;
+        *usage_kbytes = (uint64_t) pmc.PeakWorkingSetSize / 1024ULL;
     } else {
-        *usage_bytes = 0;
+        *usage_kbytes = 0;
     }
 
     return 0;
@@ -86,7 +86,7 @@ int get_systemmem_usage(uint64_t *usage_bytes)
 #if defined(__APPLE__)
     *usage_bytes = (uint64_t) usage_info.ru_maxrss;
 #else
-    *usage_bytes = (uint64_t) usage_info.ru_maxrss * 1024ULL;
+    *usage_bytes = (uint64_t) usage_info.ru_maxrss / 1024ULL;
 #endif
 
     return 0;
@@ -481,8 +481,8 @@ int main(int argc, char **argv)
     compute_stats(samples, iterations, &stats);
 
     /* Get memory usage */
-    uint64_t max_usage_bytes;
-    int err = get_systemmem_usage(&max_usage_bytes);
+    uint64_t max_usage_kbytes;
+    int err = get_systemmem_usage(&max_usage_kbytes);
     assert(err == 0);
 
     /* Report results */
@@ -516,7 +516,7 @@ int main(int argc, char **argv)
         printf("  %.0f ops/sec\n", (double) loops / stats.median);
 
         printf("\nMemory:\n");
-        printf("  Peak RSS: %ld KB\n", max_usage_bytes);
+        printf("  Peak RSS: %ld KB\n", max_usage_kbytes);
         printf("  Pool size: %.1f MB\n", (double) max_size / (1024.0 * 1024.0));
 
         printf("\nVariability:\n");
