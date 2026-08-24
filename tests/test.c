@@ -37,7 +37,7 @@ static inline size_t get_page_size(void)
     GetSystemInfo(&si);
     return (size_t) si.dwPageSize;
 #else
-    return (size_t)sysconf(_SC_PAGESIZE);
+    return (size_t) sysconf(_SC_PAGESIZE);
 #endif
 }
 
@@ -51,8 +51,8 @@ void *tlsf_resize(tlsf_t *t, size_t req_size)
      */
     if (!start_addr) {
         start_addr = VirtualAlloc(NULL, MAX_PAGES * PAGE,
-                                  MEM_RESERVE,  /* Only reserve address space */
-                                  PAGE_READWRITE  /* Rights for read and write */
+                                  MEM_RESERVE, /* Only reserve address space */
+                                  PAGE_READWRITE /* Rights for read and write */
         );
         if (!start_addr)
             return NULL;
@@ -67,18 +67,17 @@ void *tlsf_resize(tlsf_t *t, size_t req_size)
             /* Analogue for madvise(..., MADV_DONTNEED) to VirtualFree with
              * MEM_DECOMMIT Free physical memory (commit), with reserved
              * addresses
-             */ 
+             */
             VirtualFree((char *) start_addr + PAGE * req_pages,
                         (size_t) (curr_pages - req_pages) * PAGE,
                         MEM_DECOMMIT /* physical pages to zero */
             );
         } else {
             /* Commit reserved memory */
-            void *commit_ptr =
-                VirtualAlloc(start_addr, /* base address is the same */
-                             req_pages * PAGE,
-                             MEM_COMMIT, /* Commit new pages */
-                             PAGE_READWRITE);
+            void *commit_ptr = VirtualAlloc(
+                start_addr,                   /* base address is the same */
+                req_pages * PAGE, MEM_COMMIT, /* Commit new pages */
+                PAGE_READWRITE);
             if (!commit_ptr)
                 return NULL;
         }
