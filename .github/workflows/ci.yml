@@ -163,6 +163,18 @@ jobs:
       - name: Run Multi-Threaded Tests
         run: |
           .\test_thread.exe
+      - name: Compile Benchmark TLSF with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\bench.c /Fe:bench_tlsf.exe
+      - name: Run Benchmark TLSF
+        run: |
+          .\bench_tlsf.exe
+      - name: Compile WCET TLSF with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\wcet.c /Fe:wcet_tlsf.exe
+      - name: Run Benchmark TLSF
+        run: |
+          .\wcet_tlsf.exe      
   
   wcet:
     runs-on: ${{ matrix.runner }}
