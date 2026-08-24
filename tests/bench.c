@@ -19,19 +19,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <psapi.h>
+#else
 #include <sys/resource.h>
 #include <unistd.h>
+#endif
 
 #ifdef __APPLE__
 #include <mach/mach_time.h>
-#else
+#elif defined(__unix__) || defined(__posix) || defined(__FreeBSD__) || \
+    defined(__linux__) || defined(__linux)
 #include <sched.h>
 #include <time.h>
 #endif
 
 #include "tlsf.h"
+#include "tlsf_getopt.h"
 
-static tlsf_t t = TLSF_INIT;
+static tlsf_t t = TLSF_INIT_STATIC;
 
 /* Fast xorshift32 PRNG - avoids rand() overhead and mutex in hot loop */
 static uint32_t xorshift_state = 1;
@@ -44,6 +55,42 @@ static inline uint32_t xorshift32(void)
     x ^= x << 5;
     xorshift_state = x;
     return x;
+}
+
+/* Maximum memory consumption in bytes in usage_bytes*/
+int get_systemmem_usage(uint64_t *usage_kbytes)
+{
+    if (!usage_kbytes)
+        return -1;
+
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+    HANDLE hProcess = GetCurrentProcess();
+
+    /* Get memory capacity */
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(hProcess, &pmc, sizeof(pmc))) {
+        /* PeakWorkingSetSize is ru_maxrss analogue in bytes */
+        *usage_kbytes = (uint64_t) pmc.PeakWorkingSetSize / 1024ULL;
+    } else {
+        *usage_kbytes = 0;
+    }
+
+    return 0;
+#else
+    struct rusage usage_info;
+    if (getrusage(RUSAGE_SELF, &usage_info) != 0) {
+        return -1;
+    }
+
+    /* In Linux ru_maxrss is in KB but in MacOS in bytes*/
+#if defined(__APPLE__)
+    *usage_kbytes = (uint64_t) usage_info.ru_maxrss / 1024ULL;
+#else
+    *usage_kbytes = (uint64_t) usage_info.ru_maxrss;
+#endif
+
+    return 0;
+#endif
 }
 
 /* High-resolution timing abstraction */
@@ -68,6 +115,23 @@ static inline uint64_t get_time_ns(void)
     /* Fallback: accept potential precision loss */
     return ticks * timebase_info.numer / timebase_info.denom;
 #endif
+}
+#elif defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+static inline uint64_t get_time_ns(void)
+{
+    LARGE_INTEGER count;
+    LARGE_INTEGER frequency;
+
+    QueryPerformanceCounter(&count);
+    QueryPerformanceFrequency(&frequency);
+
+    uint64_t seconds = (uint64_t) (count.QuadPart / frequency.QuadPart);
+    uint64_t remainder = (uint64_t) (count.QuadPart % frequency.QuadPart);
+
+    uint64_t nanoseconds =
+        (remainder * 1000000000ULL) / (uint64_t) frequency.QuadPart;
+
+    return (seconds * 1000000000ULL) + nanoseconds;
 }
 #else
 static inline uint64_t get_time_ns(void)
@@ -280,22 +344,39 @@ int main(int argc, char **argv)
     bool quiet = false;
     int opt;
 
-    while ((opt = getopt(argc, argv, "s:l:n:i:w:cqh")) > 0) {
+    tlsf_command_option options[] = {{.is_have_param = true, .option = 's'},
+                                     {.is_have_param = true, .option = 'l'},
+                                     {.is_have_param = true, .option = 'n'},
+                                     {.is_have_param = true, .option = 'i'},
+                                     {.is_have_param = true, .option = 'w'},
+                                     {.is_have_param = false, .option = 'c'},
+                                     {.is_have_param = false, .option = 'q'},
+                                     {.is_have_param = false, .option = 'h'}};
+
+    tlsf_getop_state state = {
+        .argc = argc,
+        .argv = argv,
+        .options = options,
+        .num_options = sizeof(options) / sizeof(options[0]),
+        .optarg = NULL,
+        .counter = 1};
+
+    while ((opt = tlsf_getopt(&state)) > 0) {
         switch (opt) {
         case 's':
-            parse_size_arg(optarg, argv[0], &blk_min, &blk_max);
+            parse_size_arg(state.optarg, argv[0], &blk_min, &blk_max);
             break;
         case 'l':
-            loops = parse_int_arg(optarg, argv[0]);
+            loops = parse_int_arg(state.optarg, argv[0]);
             break;
         case 'n':
-            num_blks = parse_int_arg(optarg, argv[0]);
+            num_blks = parse_int_arg(state.optarg, argv[0]);
             break;
         case 'i':
-            iterations = parse_int_arg(optarg, argv[0]);
+            iterations = parse_int_arg(state.optarg, argv[0]);
             break;
         case 'w':
-            warmup = parse_int_arg(optarg, argv[0]);
+            warmup = parse_int_arg(state.optarg, argv[0]);
             break;
         case 'c':
             clear = true;
@@ -400,8 +481,8 @@ int main(int argc, char **argv)
     compute_stats(samples, iterations, &stats);
 
     /* Get memory usage */
-    struct rusage usage_info;
-    int err = getrusage(RUSAGE_SELF, &usage_info);
+    uint64_t max_usage_kbytes;
+    int err = get_systemmem_usage(&max_usage_kbytes);
     assert(err == 0);
 
     /* Report results */
@@ -435,13 +516,7 @@ int main(int argc, char **argv)
         printf("  %.0f ops/sec\n", (double) loops / stats.median);
 
         printf("\nMemory:\n");
-#ifdef __APPLE__
-        /* macOS: ru_maxrss is in bytes */
-        printf("  Peak RSS: %ld KB\n", usage_info.ru_maxrss / 1024);
-#else
-        /* Linux: ru_maxrss is in kilobytes */
-        printf("  Peak RSS: %ld KB\n", usage_info.ru_maxrss);
-#endif
+        printf("  Peak RSS: %ld KB\n", max_usage_kbytes);
         printf("  Pool size: %.1f MB\n", (double) max_size / (1024.0 * 1024.0));
 
         printf("\nVariability:\n");
