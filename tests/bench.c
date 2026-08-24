@@ -27,7 +27,7 @@
 #include <windows.h>
 #else
 #include <sys/resource.h>
-#include <sys/time.h>
+#include <unistd.h>
 #endif
 
 #ifdef __APPLE__
