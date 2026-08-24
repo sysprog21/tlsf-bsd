@@ -23,8 +23,8 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <psapi.h>
 #include <windows.h>
+#include <psapi.h>
 #else
 #include <sys/resource.h>
 #include <unistd.h>
@@ -69,9 +69,9 @@ int get_systemmem_usage(uint64_t *usage_bytes)
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(hProcess, &pmc, sizeof(pmc))) {
         /* PeakWorkingSetSize is ru_maxrss analogue in bytes */
-        usage_bytes = (uint64_t) pmc.PeakWorkingSetSize;
+        *usage_bytes = (uint64_t) pmc.PeakWorkingSetSize;
     } else {
-        usage_bytes = 0;
+        *usage_bytes = 0;
     }
 
     return 0;
@@ -83,9 +83,9 @@ int get_systemmem_usage(uint64_t *usage_bytes)
 
     /* In Linux ru_maxrss is in KB but in MacOS in bytes*/
 #if defined(__APPLE__)
-    usage_bytes = (uint64_t) usage_info.ru_maxrss;
+    *usage_bytes = (uint64_t) usage_info.ru_maxrss;
 #else
-    usage_bytes = (uint64_t) usage_info.ru_maxrss * 1024ULL;
+    *usage_bytes = (uint64_t) usage_info.ru_maxrss * 1024ULL;
 #endif
 
     return 0;
@@ -341,7 +341,7 @@ int main(int argc, char **argv)
     size_t warmup = 5;
     bool clear = false;
     bool quiet = false;
-    char opt;
+    int opt;
 
     tlsf_command_option options[] = {{.is_have_param = true, .option = 's'},
                                      {.is_have_param = true, .option = 'l'},

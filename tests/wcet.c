@@ -44,8 +44,8 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <psapi.h>
 #include <windows.h>
+#include <psapi.h>
 #endif
 
 #ifdef __APPLE__
@@ -524,7 +524,7 @@ int main(int argc, char **argv)
     bool csv_mode = false;
     bool cold_cache = false;
     const char *raw_file = NULL;
-    char opt;
+    int opt;
 
     tlsf_command_option options[] = {{.is_have_param = true, .option = 'i'},
                                      {.is_have_param = true, .option = 'w'},
