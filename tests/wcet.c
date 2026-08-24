@@ -24,6 +24,10 @@
  * optimization-level variation.
  */
 
+#if defined(_MSC_VER)
+#define _CRT_SECURE_NO_WARNINGS 1
+#endif
+
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
@@ -32,7 +36,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__unix__) || defined(__APPLE__) || defined(__posix) || \
+    defined(__FreeBSD__) || defined(__linux__) || defined(__linux)
 #include <unistd.h>
+#endif
+#if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <psapi.h>
+#include <windows.h>
+#endif
 
 #ifdef __APPLE__
 #include <mach/mach_time.h>
@@ -43,6 +57,8 @@
 #include "tlsf.h"
 
 #include "pool_limits.h"
+
+#include "tlsf_getopt.h"
 
 /* Timing primitives */
 
@@ -106,6 +122,25 @@ static inline tick_t read_tick(void)
 #endif
 }
 
+#elif defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+#define TICK_UNIT "ns"
+
+static inline tick_t read_tick(void)
+{
+    LARGE_INTEGER count;
+    LARGE_INTEGER frequency;
+
+    QueryPerformanceCounter(&count);
+    QueryPerformanceFrequency(&frequency);
+
+    uint64_t seconds = (uint64_t) (count.QuadPart / frequency.QuadPart);
+    uint64_t remainder = (uint64_t) (count.QuadPart % frequency.QuadPart);
+
+    uint64_t nanoseconds =
+        (remainder * 1000000000ULL) / (uint64_t) frequency.QuadPart;
+
+    return (tick_t) ((seconds * 1000000000ULL) + nanoseconds);
+}
 #else
 #define TICK_UNIT "ns"
 
@@ -489,24 +524,40 @@ int main(int argc, char **argv)
     bool csv_mode = false;
     bool cold_cache = false;
     const char *raw_file = NULL;
-    int opt;
+    char opt;
 
-    while ((opt = getopt(argc, argv, "i:w:p:cr:Ch")) > 0) {
+    tlsf_command_option options[] = {{.is_have_param = true, .option = 'i'},
+                                     {.is_have_param = true, .option = 'w'},
+                                     {.is_have_param = true, .option = 'p'},
+                                     {.is_have_param = false, .option = 'c'},
+                                     {.is_have_param = true, .option = 'r'},
+                                     {.is_have_param = false, .option = 'C'},
+                                     {.is_have_param = false, .option = 'h'}};
+
+    tlsf_getop_state state = {
+        .argc = argc,
+        .argv = argv,
+        .options = options,
+        .num_options = sizeof(options) / sizeof(options[0]),
+        .optarg = NULL,
+        .counter = 1};
+
+    while ((opt = tlsf_getopt(&state)) > 0) {
         switch (opt) {
         case 'i':
-            iterations = parse_size_arg(optarg, "iterations");
+            iterations = parse_size_arg(state.optarg, "iterations");
             break;
         case 'w':
-            warmup = parse_size_arg(optarg, "warmup");
+            warmup = parse_size_arg(state.optarg, "warmup");
             break;
         case 'p':
-            pool_size = parse_size_arg(optarg, "pool size");
+            pool_size = parse_size_arg(state.optarg, "pool size");
             break;
         case 'c':
             csv_mode = true;
             break;
         case 'r':
-            raw_file = optarg;
+            raw_file = state.optarg;
             break;
         case 'C':
             cold_cache = true;
