@@ -14,6 +14,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -57,8 +58,8 @@ static inline uint32_t xorshift32(void)
     return x;
 }
 
-/* Maximum memory consumption in bytes in usage_bytes*/
-int get_systemmem_usage(uint64_t *usage_kbytes)
+/* Peak resident set size in kilobytes. Returns 0 on success, -1 on failure. */
+static int get_systemmem_usage(uint64_t *usage_kbytes)
 {
     if (!usage_kbytes)
         return -1;
@@ -71,11 +72,10 @@ int get_systemmem_usage(uint64_t *usage_kbytes)
     if (GetProcessMemoryInfo(hProcess, &pmc, sizeof(pmc))) {
         /* PeakWorkingSetSize is ru_maxrss analogue in bytes */
         *usage_kbytes = (uint64_t) pmc.PeakWorkingSetSize / 1024ULL;
-    } else {
-        *usage_kbytes = 0;
+        return 0;
     }
 
-    return 0;
+    return -1;
 #else
     struct rusage usage_info;
     if (getrusage(RUSAGE_SELF, &usage_info) != 0) {
@@ -117,21 +117,25 @@ static inline uint64_t get_time_ns(void)
 #endif
 }
 #elif defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+static uint64_t qpc_frequency;
+
 static inline uint64_t get_time_ns(void)
 {
+    if (!qpc_frequency) {
+        LARGE_INTEGER frequency;
+        QueryPerformanceFrequency(&frequency);
+        qpc_frequency = (uint64_t) frequency.QuadPart;
+    }
+
     LARGE_INTEGER count;
-    LARGE_INTEGER frequency;
-
     QueryPerformanceCounter(&count);
-    QueryPerformanceFrequency(&frequency);
 
-    uint64_t seconds = (uint64_t) (count.QuadPart / frequency.QuadPart);
-    uint64_t remainder = (uint64_t) (count.QuadPart % frequency.QuadPart);
+    uint64_t ticks = (uint64_t) count.QuadPart;
+    uint64_t seconds = ticks / qpc_frequency;
+    uint64_t remainder = ticks % qpc_frequency;
 
-    uint64_t nanoseconds =
-        (remainder * 1000000000ULL) / (uint64_t) frequency.QuadPart;
-
-    return (seconds * 1000000000ULL) + nanoseconds;
+    return (seconds * 1000000000ULL) +
+           (remainder * 1000000000ULL) / qpc_frequency;
 }
 #else
 static inline uint64_t get_time_ns(void)
@@ -391,6 +395,16 @@ int main(int argc, char **argv)
         }
     }
 
+    /* No positional arguments are accepted. Without this, tlsf_getopt() stops
+     * at the first non-option and every flag after it is silently dropped, so
+     * "bench 64 -l 100000" would quietly measure the defaults instead.
+     */
+    if (state.counter < argc) {
+        fprintf(stderr, "%s: unexpected argument -- '%s'\n", argv[0],
+                argv[state.counter]);
+        usage(argv[0]);
+    }
+
     /* Validate parameters */
     if (iterations == 0) {
         fprintf(stderr, "Error: iterations (-i) must be > 0\n");
@@ -481,9 +495,8 @@ int main(int argc, char **argv)
     compute_stats(samples, iterations, &stats);
 
     /* Get memory usage */
-    uint64_t max_usage_kbytes;
-    int err = get_systemmem_usage(&max_usage_kbytes);
-    assert(err == 0);
+    uint64_t max_usage_kbytes = 0;
+    bool have_rss = get_systemmem_usage(&max_usage_kbytes) == 0;
 
     /* Report results */
     if (quiet) {
@@ -516,7 +529,10 @@ int main(int argc, char **argv)
         printf("  %.0f ops/sec\n", (double) loops / stats.median);
 
         printf("\nMemory:\n");
-        printf("  Peak RSS: %ld KB\n", max_usage_kbytes);
+        if (have_rss)
+            printf("  Peak RSS: %" PRIu64 " KB\n", max_usage_kbytes);
+        else
+            printf("  Peak RSS: unavailable\n");
         printf("  Pool size: %.1f MB\n", (double) max_size / (1024.0 * 1024.0));
 
         printf("\nVariability:\n");
