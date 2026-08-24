@@ -95,7 +95,7 @@ if(BUILD_TLSF_WCET)
     add_executable(wcet tests/wcet.c)
     target_link_libraries(wcet PRIVATE tlsf)
     if(MATH_LIBRARY)
-        target_link_libraries(bench PRIVATE ${MATH_LIBRARY})
+        target_link_libraries(wcet PRIVATE ${MATH_LIBRARY})
     endif()
 endif()
 
