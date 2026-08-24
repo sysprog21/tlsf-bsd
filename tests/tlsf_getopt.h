@@ -38,10 +38,10 @@ inline tlsf_command_option* tlsf_scan_options(tlsf_getop_state* state, char c)
 
 int tlsf_getopt(tlsf_getop_state* state)
 {
-    state->optarg = NULL;
-
     if (!state || state->argc <= 1 || state->num_options == 0 || !state->argv) return -1;
     if (state->counter >= state->argc) return -1;
+
+    state->optarg = NULL;
 
     char* current_arg = state->argv[state->counter];
 
