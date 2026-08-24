@@ -84,9 +84,9 @@ int get_systemmem_usage(uint64_t *usage_kbytes)
 
     /* In Linux ru_maxrss is in KB but in MacOS in bytes*/
 #if defined(__APPLE__)
-    *usage_kbytes = (uint64_t) usage_info.ru_maxrss;
-#else
     *usage_kbytes = (uint64_t) usage_info.ru_maxrss / 1024ULL;
+#else
+    *usage_kbytes = (uint64_t) usage_info.ru_maxrss;
 #endif
 
     return 0;
