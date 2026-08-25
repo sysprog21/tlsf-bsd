@@ -203,10 +203,16 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         if (i % check_stride == 0)
             tlsf_check(t);
 
-        /* Fill with magic (only when testing up to 1MB). */
+        /* Fill with magic (only when testing up to 1MB). The fill runs over the
+         * usable size rather than the requested length, so it doubles as the
+         * check on tlsf_usable_size(): under-reporting trips the assert, and
+         * over-reporting corrupts a neighbour that tlsf_check() then sees.
+         */
         uint8_t *data = (uint8_t *) p[i];
+        size_t usable = tlsf_usable_size(data);
+        assert(usable >= len);
         if (spacelen <= 1024 * 1024)
-            memset(data, 0, len);
+            memset(data, 0, usable);
         data[0] = 0xa5;
 
         i++;
