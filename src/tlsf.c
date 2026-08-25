@@ -1531,20 +1531,10 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (!t || !mem)
         return 0;
 
-    /* Clear any stale ASan shadow in the provided memory. */
-    ASAN_UNPOISON(mem, bytes);
-
-    /* Zero-initialize the control structure, then point every bin at the
-     * sentinel so that free-list insert/remove can write unconditionally.
-     */
-    memset(t, 0, sizeof(*t));
-    bins_reset(t);
-
-    /* Align pool start */
-    char *start = align_ptr((char *) mem, ALIGN_SIZE);
-    size_t adj = (size_t) (start - (char *) mem);
+    size_t adj = align_offset((char *) mem, ALIGN_SIZE);
     if (bytes <= adj)
         return 0;
+    char *start = (char *) mem + adj;
 
     /* Compute usable pool size (aligned down) */
     size_t pool_bytes = (bytes - adj) & ~(ALIGN_SIZE - 1);
@@ -1555,6 +1545,18 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     free_size &= ~(ALIGN_SIZE - 1);
     if (free_size < BLOCK_SIZE_MIN || free_size > BLOCK_SIZE_MAX)
         return 0;
+
+    /* Clear any stale ASan shadow in the provided memory. Deferred until every
+     * argument check has passed so a rejected re-init leaves the poisoning of
+     * an existing arena, and with it use-after-free detection, intact.
+     */
+    ASAN_UNPOISON(mem, bytes);
+
+    /* Zero-initialize the control structure, then point every bin at the
+     * sentinel so that free-list insert/remove can write unconditionally.
+     */
+    memset(t, 0, sizeof(*t));
+    bins_reset(t);
 
     /* Mark as a fixed-size, caller-owned pool */
     t->fixed = true;

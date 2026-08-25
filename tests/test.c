@@ -773,7 +773,79 @@ static void static_pool_test(void)
     printf(".");
     fflush(stdout);
 
-    /* Test 7: Stats on static pool */
+    /* Test 7: An unaligned base is adjusted forward, not rejected. The
+     * adjustment is computed without forming the aligned pointer first, so
+     * confirm it still lands where align_ptr() would have put it.
+     */
+    {
+        const size_t align = sizeof(void *);
+
+        /* The union forces an aligned base. A bare char array is only
+         * incidentally aligned, and the size comparison below is exact only
+         * when 'raw' itself needs no adjustment.
+         */
+        static union {
+            void *alignment;
+            char bytes[4096 + sizeof(void *)];
+        } storage;
+        char *raw = storage.bytes;
+        char *unaligned = raw + 1;
+        tlsf_t t;
+        size_t usable = tlsf_pool_init(&t, unaligned, 4096);
+        assert(usable > 0);
+
+        void *p = tlsf_malloc(&t, 64);
+        assert(p);
+        assert((size_t) p % align == 0);
+        tlsf_check(&t);
+        tlsf_free(&t, p);
+
+        /* The same span from an aligned base loses exactly the one alignment
+         * step that the adjustment consumed.
+         */
+        tlsf_t ta;
+        size_t aligned_usable = tlsf_pool_init(&ta, raw, 4096);
+        assert(aligned_usable - usable == align);
+
+        /* A span shorter than the adjustment must be rejected. This pins the
+         * return contract, not the 'bytes <= adj' guard: drop that guard and
+         * the later BLOCK_SIZE_MAX check still rejects the underflowed span.
+         */
+        tlsf_t tb;
+        assert(tlsf_pool_init(&tb, raw + 1, align - 1) == 0);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 8: A failed re-init must leave a live pool alone. */
+    {
+        static char pool[8192];
+        char tiny[8];
+        tlsf_t t;
+        assert(tlsf_pool_init(&t, pool, sizeof(pool)) > 0);
+
+        void *p = tlsf_malloc(&t, 512);
+        assert(p);
+        memset(p, 0xA5, 512);
+
+        tlsf_stats_t before;
+        assert(tlsf_get_stats(&t, &before) == 0);
+        assert(tlsf_pool_init(&t, tiny, sizeof(tiny)) == 0);
+
+        tlsf_stats_t after;
+        assert(tlsf_get_stats(&t, &after) == 0);
+        assert(after.total_used == before.total_used);
+        assert(after.total_free == before.total_free);
+        assert(after.block_count == before.block_count);
+        assert(((unsigned char *) p)[0] == 0xA5);
+
+        tlsf_free(&t, p);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
+    /* Test 9: Stats on static pool */
     {
         static char pool[16384];
         tlsf_t t;
@@ -797,7 +869,7 @@ static void static_pool_test(void)
     printf(".");
     fflush(stdout);
 
-    /* Test 8: Append pool extends a static pool */
+    /* Test 10: Append pool extends a static pool */
     {
         static char combined[8192];
         tlsf_t t;
