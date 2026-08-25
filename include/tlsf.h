@@ -20,8 +20,8 @@ extern "C" {
 
 /* IMPORTANT: the configuration macros below (TLSF_MAX_POOL_BITS in particular)
  * change the layout and size of tlsf_t, which callers allocate themselves.
- * Every translation unit in a build -- src/tlsf.c and every consumer -- must
- * see identical definitions. A mismatch is not diagnosed: the struct silently
+ * Every translation unit in a build (src/tlsf.c and every consumer) must see
+ * identical definitions. A mismatch is not diagnosed: the struct silently
  * differs in size (8376 vs 3440 bytes for the default vs TLSF_MAX_POOL_BITS=20
  * on 64-bit) and accesses land at the wrong offsets. Define them in the build
  * system, never in a single .c file.
@@ -67,9 +67,16 @@ extern "C" {
 #endif
 
 /* Configurable maximum pool size: define TLSF_MAX_POOL_BITS to clamp the
- * first-level index, reducing the tlsf_t control structure size. Pool cannot
- * exceed 2^TLSF_MAX_POOL_BITS bytes. E.g. -DTLSF_MAX_POOL_BITS=20 for a 1MB-max
- * pool.
+ * first-level index, which shrinks the tlsf_t control structure. On 64-bit,
+ * -DTLSF_MAX_POOL_BITS=20 takes tlsf_t from 8376 down to 3440 bytes.
+ *
+ * The clamp bounds a dynamic arena at 2^TLSF_MAX_POOL_BITS bytes. It does not
+ * bound a fixed pool at the same figure: tlsf_pool_init() accepts only about
+ * half that, because the pool's single initial free block is itself capped at
+ * 2^(_TLSF_FL_MAX - 1). For an ALIGN_SIZE-aligned pointer at
+ * TLSF_MAX_POOL_BITS=20 the largest accepted region is 524304 bytes, not 1 MB.
+ * An unaligned pointer may carry up to ALIGN_SIZE-1 further bytes that are
+ * skipped for alignment. TLSF_MAX_POOL_BYTES below states the limit.
  */
 #ifdef TLSF_MAX_POOL_BITS
 #define _TLSF_FL_MAX TLSF_MAX_POOL_BITS
@@ -100,10 +107,14 @@ extern "C" {
  */
 #define TLSF_MAX_POOL_BYTES \
     (((size_t) 1 << (_TLSF_FL_MAX - 1)) + 2 * sizeof(size_t))
+
+/* An allocator with no arena yet. The first tlsf_malloc() grows one through
+ * tlsf_resize(), so an instance initialized this way needs that callback.
+ */
 #define TLSF_INIT ((tlsf_t) {.size = 0})
 
-/* TLSF_INIT_STATIC is need to be used instead of TLSF_INIT for initializing
- * static objects for cross platform compatibility
+/* The same value for objects with static storage duration. MSVC rejects a
+ * compound literal as a static initializer, so it gets the bare brace form.
  */
 #if defined(_MSC_VER)
 #define TLSF_INIT_STATIC {.size = 0}
@@ -133,12 +144,11 @@ extern "C" {
 
 /* Block header structure.
  *
- * prev: Pointer to the previous physical block. Only valid when the
- *            previous block is free; physically stored at the tail of that
- *            block's payload.
- * header: Size (upper bits) | status bits (lower 2 bits). next_free: Next block
- * in the same free list (only valid when free). prev_free: Previous block in
- * the same free list (only valid when free).
+ * @prev : Pointer to the previous physical block. Only valid when the previous
+ *         block is free; physically stored at the tail of that block's payload.
+ * @header : Size (upper bits) | status bits (lower 2 bits).
+ * @next_free : Next block in the same free list (only valid when free).
+ * @prev_free : Previous block in the same free list (only valid when free).
  */
 struct tlsf_block {
     struct tlsf_block *prev;
@@ -147,22 +157,34 @@ struct tlsf_block {
 };
 
 typedef struct {
+    /* First-level bitmap, plus one second-level bitmap per first-level class. A
+     * set bit means that bin holds at least one free block, which is what makes
+     * the search for a fit O(1).
+     */
     uint32_t fl, sl[_TLSF_FL_COUNT];
 
-    /* Fixed pool: memory is caller-owned (tlsf_pool_init) and the arena can
-     * neither grow nor shrink. Orthogonal to 'arena', which is always the
-     * current base address once the pool has any memory.
+    /* Fixed pool: memory is caller-owned (tlsf_pool_init) and the allocator
+     * never calls tlsf_resize(), so the arena never auto-grows and never
+     * shrinks. It can still be extended deliberately, by tlsf_append_pool()
+     * with adjacent memory. Orthogonal to @arena, which is always the current
+     * base address once the pool has any memory.
      */
     bool fixed;
-    void *arena; /* Pool base address; NULL until a dynamic pool first grows */
-    size_t size;
+
+    /* Pool base address. Set by tlsf_pool_init() for a fixed pool; NULL for a
+     * dynamic pool until its first growth.
+     */
+    void *arena;
+    size_t size; /* Arena bytes owned, sentinels included; 0 when there is no
+                  * pool yet
+                  */
     struct tlsf_block *block[_TLSF_FL_COUNT][_TLSF_SL_COUNT];
     struct tlsf_block block_null; /* Free-list sentinel (absorbs writes) */
 } tlsf_t;
 
 /* The header word immediately precedes a payload pointer. Its validity is the
- * memory-safety condition shared by free and realloc; allocation ownership is
- * a semantic caller obligation, documented on those functions.
+ * memory-safety condition shared by free and realloc; allocation ownership is a
+ * semantic caller obligation, documented on those functions.
  */
 /*@
   predicate tlsf_payload_header{L}(void *ptr) =
@@ -175,6 +197,14 @@ typedef struct {
  * tlsf_pool_init() need not provide this function. A weak default returning
  * NULL is provided in tlsf.c; dynamic pool users MUST override it, otherwise
  * allocations will silently fail.
+ *
+ * The first successful resize establishes the arena base. While the arena is
+ * live, every later successful nonzero resize must return that same base and
+ * preserve the surviving prefix at the same offsets. Returning NULL must leave
+ * the old mapping intact. A resize to zero releases the arena and ends its
+ * lifetime; the next nonzero resize starts over and may establish a different
+ * base. The callback must not mutate @t; allocator state is owned by the
+ * allocator.
  */
 /*@
   requires \valid(t);
@@ -186,15 +216,15 @@ void *tlsf_resize(tlsf_t *t, size_t size);
 /**
  * Allocate memory with a specified alignment.
  *
- * @param t The TLSF allocator instance
- * @param align Alignment in bytes; must be a non-zero power of two
- * @param size Requested allocation size in bytes; need not be a multiple of
- *              @align (follows POSIX posix_memalign semantics; C11
- *              aligned_alloc required size % align == 0 but C23 and
- *              common implementations dropped that constraint)
- * @return Pointer to at least @size bytes aligned to @align, or NULL on
- *         failure.  A zero @size request returns a unique minimum-sized
- *         allocation (consistent with tlsf_malloc).
+ * @t : The TLSF allocator instance
+ * @align : Alignment in bytes; must be a non-zero power of two
+ * @size : Requested allocation size in bytes; need not be a multiple of @align
+ * (follows POSIX posix_memalign semantics; C11 aligned_alloc required size %
+ * align == 0 but C23 and common implementations dropped that constraint)
+ *
+ * Return Pointer to at least @size bytes aligned to @align, or NULL on failure.
+ * A zero @size request returns a unique minimum-sized allocation (consistent
+ * with tlsf_malloc).
  */
 /*@
   requires \valid(t);
@@ -204,25 +234,27 @@ void *tlsf_resize(tlsf_t *t, size_t size);
 void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size);
 
 /**
- * Append a memory block to an existing pool, potentially coalescing with the
- * last block if it's free.
+ * Extend an existing pool with more memory, coalescing with the pool's last
+ * block when that block is free. Works for fixed and dynamic pools alike.
  *
- * Returns the number of bytes actually used from the memory block for pool
- * expansion.
+ * @mem, rounded up to ALIGN_SIZE, must equal the current pool end. A region
+ * that does not abut the pool is rejected, and that is the usual reason for a 0
+ * return. Bytes lost to that rounding and to the new sentinel are not handed
+ * back, so the return value can be less than @size.
  *
- * @tlsf : The TLSF allocator instance
+ * @t : The TLSF allocator instance
  * @mem : Pointer to the memory block to append
  * @size : Size of the memory block in bytes
  *
  * Return Number of bytes used from the memory block, 0 on failure
  */
 /*@
-  requires \valid(tlsf);
+  requires \valid(t);
   requires mem != \null && size != 0 ==>
     \valid(((char *)mem) + (0 .. size - 1));
   ensures \result <= size;
 */
-size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
+size_t tlsf_append_pool(tlsf_t *t, void *mem, size_t size);
 
 /**
  * Initialize the allocator with a fixed-size memory pool. The pool will not
@@ -233,7 +265,12 @@ size_t tlsf_append_pool(tlsf_t *tlsf, void *mem, size_t size);
  * Multiple independent instances are supported by initializing separate tlsf_t
  * structures with their own memory regions.
  *
- * @t : The TLSF allocator instance (will be zero-initialized)
+ * On success @t is zero-initialized before the pool is laid out. On failure @t
+ * is left exactly as it was, so a rejected re-init cannot destroy a live arena;
+ * a caller that ignores the return value therefore inherits whatever @t already
+ * held, including indeterminate bytes for a fresh automatic object.
+ *
+ * @t : The TLSF allocator instance
  * @mem : Pointer to the memory region to use as the pool
  * @bytes : Total size of the memory region in bytes
  *
@@ -269,12 +306,12 @@ void tlsf_pool_reset(tlsf_t *t);
 /**
  * Allocate memory from the pool.
  *
- * @param t The TLSF allocator instance
- * @param size Requested allocation size in bytes. A zero @size request
- *             returns a unique minimum-sized allocation (POSIX-compatible
- *             behavior), not NULL.
- * @return Pointer to at least @size bytes, aligned to ALIGN_SIZE (8 on
- *         64-bit, 4 on 32-bit), or NULL on failure.
+ * @t : The TLSF allocator instance
+ * @size : Requested allocation size in bytes. A zero @size request returns a
+ * unique minimum-sized allocation (POSIX-compatible behavior), not NULL.
+ *
+ * Return Pointer to at least @size bytes, aligned to ALIGN_SIZE (8 on 64-bit, 4
+ * on 32-bit), or NULL on failure.
  */
 /*@
   requires \valid(t);
@@ -282,6 +319,25 @@ void tlsf_pool_reset(tlsf_t *t);
 */
 void *tlsf_malloc(tlsf_t *t, size_t size);
 
+/**
+ * Resize an existing allocation, preserving its contents up to the smaller of
+ * the old and new sizes.
+ *
+ * Two calls are aliases for other entry points: a NULL @mem allocates, and a
+ * zero @size frees @mem and returns NULL. Note the latter differs from C's
+ * realloc, where the same call is implementation-defined (C17) or undefined
+ * (C23).
+ *
+ * The block may be grown in place, slid backward onto a free predecessor, or
+ * relocated, so the returned pointer need not equal @mem. On failure NULL is
+ * returned and @mem is left allocated and intact.
+ *
+ * @t : The TLSF allocator instance
+ * @mem : Pointer from tlsf_malloc/aalloc/realloc, or NULL
+ * @size : Requested new size in bytes
+ *
+ * Return Pointer to the resized allocation, or NULL on failure or zero @size
+ */
 /*@
   requires \valid(t);
   requires mem != \null ==> tlsf_payload_header(mem);
@@ -290,7 +346,14 @@ void *tlsf_malloc(tlsf_t *t, size_t size);
 void *tlsf_realloc(tlsf_t *t, void *mem, size_t size);
 
 /**
- * Releases the previously allocated memory, given the pointer.
+ * Release an allocation and coalesce it with any free physical neighbors.
+ *
+ * A NULL @mem is a no-op. Passing a pointer that was already freed, or one that
+ * did not come from this allocator, is undefined: it corrupts metadata silently
+ * in release builds and trips an assertion in debug builds.
+ *
+ * @t : The TLSF allocator instance
+ * @mem : Pointer from tlsf_malloc/aalloc/realloc, or NULL
  */
 /*@
   requires \valid(t);
@@ -301,10 +364,11 @@ void tlsf_free(tlsf_t *t, void *mem);
 /**
  * Return the usable size of an existing allocation. The usable size may exceed
  * the originally requested size due to alignment rounding and bin-class
- * quantization. Equivalent to POSIX malloc_usable_size().
+ * quantization. The analogue of glibc's malloc_usable_size(); POSIX specifies
+ * no such function.
  *
  * @ptr : Pointer previously returned by tlsf_malloc/aalloc/realloc. Behavior is
- * undefined if ptr has been freed.
+ *        undefined if ptr has been freed.
  *
  * Return Usable payload bytes, or 0 if ptr is NULL
  */
@@ -314,8 +378,20 @@ void tlsf_free(tlsf_t *t, void *mem);
 */
 size_t tlsf_usable_size(void *ptr);
 
+/**
+ * Walk the whole arena and verify its invariants: block linkage, size and
+ * alignment, sentinels, and agreement between the bitmaps and the free lists.
+ *
+ * A violation it reaches prints to stderr and calls abort(); corruption severe
+ * enough to derail the walk itself may fault first. It is a debugging aid, not
+ * an error-reporting API, and it is linear in the number of blocks. Without
+ * TLSF_ENABLE_CHECK it compiles to nothing; see the note at the top of this
+ * header about setting that macro uniformly.
+ *
+ * @t : The TLSF allocator instance
+ */
 #ifdef TLSF_ENABLE_CHECK
-void tlsf_check(tlsf_t *);
+void tlsf_check(tlsf_t *t);
 #else
 static inline void tlsf_check(tlsf_t *t)
 {
@@ -336,11 +412,16 @@ typedef struct {
 } tlsf_stats_t;
 
 /**
- * Collect heap statistics by walking all blocks.
+ * Collect heap statistics by walking every block, so cost is linear in the
+ * block count rather than constant.
+ *
+ * An allocator with no pool yet reports all-zero statistics and succeeds.
+ *
  * @t : The TLSF allocator instance
  * @stats : Output structure to fill with statistics
  *
- * Return 0 on success, -1 if t or stats is NULL
+ * Return 0 on success, -1 if @t or @stats is NULL, or if @t claims a nonzero
+ * size but has no arena
  */
 /*@
   behavior invalid:
