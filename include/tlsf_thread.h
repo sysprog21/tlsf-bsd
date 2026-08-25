@@ -113,7 +113,7 @@ extern "C" {
 #elif defined(__GNUC__) && (__GNUC__ >= 8) && \
     (defined(__MINGW32__) || defined(__MINGW64__))
 #define TLSF_THREAD_WIN_SRWLOCK
-#elif
+#else
 #define TLSF_THREAD_WIN_CRSECTION
 #endif
 #endif
