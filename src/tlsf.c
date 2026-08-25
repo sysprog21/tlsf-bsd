@@ -434,24 +434,49 @@ INLINE size_t align_up(size_t x, size_t align)
     return (((x - 1) | (align - 1)) + 1);
 }
 
+/* Bytes that must be added to 'p' to reach the next 'align' boundary.
+ *
+ * Callers that cannot yet prove the boundary lies inside their buffer need this
+ * offset on its own: forming the aligned pointer first would run past the end
+ * of an undersized object before the bounds check can reject it.
+ *
+ * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
+ */
+/*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
+  assigns \nothing;
+*/
+INLINE size_t align_offset(const char *p, size_t align)
+{
+    ASSERT(align, "alignment must be non-zero");
+    ASSERT(!(align & (align - 1)), "must align to a power of two");
+    return (size_t) (-(uintptr_t) p) & (align - 1);
+}
+
 /* Align pointer while preserving pointer provenance.
  *
  * The naive approach '(char *) align_up((size_t) p, align)' loses provenance
  * because the integer-to-pointer cast creates a pointer with no derivation
  * history. This causes issues with Miri, UBSan, and strict aliasing analysis.
+ * Adding the offset to 'p' keeps the result derived from 'p'.
  *
- * Instead, we compute the alignment offset and use pointer arithmetic:
- *   p + (aligned_addr - addr)
- * This preserves provenance because the result is derived from 'p'.
- *
- * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
+ * The caller must own a full alignment window at 'p'. Forming a pointer past
+ * the end of the object is undefined even when it is never dereferenced, and
+ * the boundary can sit up to 'align - 1' bytes ahead. A caller that cannot
+ * promise that window yet wants align_offset() instead, which yields the
+ * distance as a number so the span can be bounds-checked before any pointer is
+ * built. That is why tlsf_pool_init() uses align_offset().
  */
-/*@ assigns \result \from p, align; */
+/*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
+  requires \valid_read((char *) p + (0 .. align - 1));
+  assigns \result \from p, align;
+*/
 INLINE char *align_ptr(char *p, size_t align)
 {
-    uintptr_t addr = (uintptr_t) p;
-    uintptr_t aligned_addr = align_up(addr, align);
-    return p + (aligned_addr - addr);
+    return p + align_offset(p, align);
 }
 
 /*@ assigns \result \from block; */
@@ -704,7 +729,7 @@ INLINE size_t round_block_size(size_t size)
  */
 /*@
   requires size > 0;
-  requires size <= TLSF_MAX_SIZE;
+  requires size < ((size_t) 1 << FL_MAX);
   requires \valid(fl);
   requires \valid(sl);
   requires \separated(fl, sl);
@@ -746,6 +771,25 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
     ASSERT(*sl < SL_COUNT, "wrong second level");
 }
 
+/* The preconditions below mirror the runtime asserts and are what discharge the
+ * shift and array-index obligations on 't->sl[*fl]' and '~0U << *sl'.
+ *
+ * Deliberately kept out of WP_FUNCTIONS: 35 of 36 goals prove, and the last one
+ * is the bitmap_ffs precondition on line 'sl_map = t->sl[*fl]'. Proving it
+ * needs the coherence invariant "a set bit in t->fl implies a nonzero
+ * t->sl[i]", which in turn needs a postcondition relating bitmap_ffs to the bit
+ * it found. bitmap_ffs is __builtin_ctz here, and Alt-Ergo does not discharge
+ * that bit-level link. Add this function to WP_FUNCTIONS only together with
+ * that invariant.
+ */
+/*@
+  requires \valid(t);
+  requires \valid(fl) && \valid(sl);
+  requires \separated(fl, sl);
+  requires *fl < FL_COUNT;
+  requires *sl < SL_COUNT;
+  assigns *fl, *sl;
+*/
 INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
 {
     ASSERT(*fl < FL_COUNT, "wrong first level");
@@ -813,6 +857,18 @@ INLINE void free_list_unlink(tlsf_block_t *prev, tlsf_block_t *next)
 /* Remove a free block from the free list. Unconditional writes: prev/next may
  * be &t->block_null (sentinel), in which case the writes are harmless.
  */
+/*@
+  requires \valid(t);
+  requires \valid(block);
+  requires fl < FL_COUNT;
+  requires sl < SL_COUNT;
+  requires \valid(block->prev_free);
+  requires \valid(block->next_free);
+  requires block->prev_free == block->next_free ||
+          \separated(block->prev_free, block->next_free);
+  assigns block->prev_free->next_free, block->next_free->prev_free;
+  assigns t->block[fl][sl], t->sl[fl], t->fl;
+*/
 INLINE void remove_free_block(tlsf_t *t,
                               tlsf_block_t *block,
                               uint32_t fl,
@@ -866,6 +922,18 @@ INLINE void free_list_link(tlsf_block_t *block,
  * Unconditional write: current may be &t->block_null (sentinel), in which case
  * the write to current->prev_free is harmless.
  */
+/*@
+  requires \valid(t);
+  requires \valid(block);
+  requires fl < FL_COUNT;
+  requires sl < SL_COUNT;
+  requires \valid(t->block[fl][sl]);
+  requires \separated(block, t->block[fl][sl]);
+  requires \separated(block, &t->block_null);
+  assigns block->next_free, block->prev_free;
+  assigns t->block[fl][sl]->prev_free;
+  assigns t->block[fl][sl], t->fl, t->sl[fl];
+*/
 INLINE void insert_free_block(tlsf_t *t,
                               tlsf_block_t *block,
                               uint32_t fl,
@@ -1139,7 +1207,8 @@ static bool arena_grow(tlsf_t *t, size_t size)
 
 static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
 {
-    if (!t->size || !mem || size < 2 * BLOCK_OVERHEAD)
+    if (!t->size || !mem || size < 2 * BLOCK_OVERHEAD ||
+        size >= (size_t) 1 << FL_MAX)
         return 0;
 
     /* Align memory block boundaries */
@@ -1176,11 +1245,13 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
      * aligned_size for payload + BLOCK_OVERHEAD for new sentinel.
      */
     size_t old_size = t->size;
-    size_t new_total_size = t->size + aligned_size + BLOCK_OVERHEAD;
 
-    /* Reject if expanded pool would exceed the maximum addressable range. */
-    if (UNLIKELY(new_total_size > (size_t) 1 << FL_MAX))
+    /* Check before adding, so the total cannot wrap on 32-bit targets. */
+    if (UNLIKELY(t->size > ((size_t) 1 << FL_MAX) - BLOCK_OVERHEAD ||
+                 aligned_size >
+                     ((size_t) 1 << FL_MAX) - BLOCK_OVERHEAD - t->size))
         return 0;
+    size_t new_total_size = t->size + aligned_size + BLOCK_OVERHEAD;
 
     /* For dynamic pools, request the backend to extend. For fixed pools, the
      * caller provides adjacent memory directly.
@@ -1514,20 +1585,10 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (!t || !mem)
         return 0;
 
-    /* Clear any stale ASan shadow in the provided memory. */
-    ASAN_UNPOISON(mem, bytes);
-
-    /* Zero-initialize the control structure, then point every bin at the
-     * sentinel so that free-list insert/remove can write unconditionally.
-     */
-    memset(t, 0, sizeof(*t));
-    bins_reset(t);
-
-    /* Align pool start */
-    char *start = align_ptr((char *) mem, ALIGN_SIZE);
-    size_t adj = (size_t) (start - (char *) mem);
+    size_t adj = align_offset((char *) mem, ALIGN_SIZE);
     if (bytes <= adj)
         return 0;
+    char *start = (char *) mem + adj;
 
     /* Compute usable pool size (aligned down) */
     size_t pool_bytes = (bytes - adj) & ~(ALIGN_SIZE - 1);
@@ -1538,6 +1599,18 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     free_size &= ~(ALIGN_SIZE - 1);
     if (free_size < BLOCK_SIZE_MIN || free_size > BLOCK_SIZE_MAX)
         return 0;
+
+    /* Clear any stale ASan shadow in the provided memory. Deferred until every
+     * argument check has passed so a rejected re-init leaves the poisoning of
+     * an existing arena, and with it use-after-free detection, intact.
+     */
+    ASAN_UNPOISON(mem, bytes);
+
+    /* Zero-initialize the control structure, then point every bin at the
+     * sentinel so that free-list insert/remove can write unconditionally.
+     */
+    memset(t, 0, sizeof(*t));
+    bins_reset(t);
 
     /* Mark as a fixed-size, caller-owned pool */
     t->fixed = true;

@@ -11,9 +11,12 @@
  *
  * Instead of a single coarse mutex around the entire allocator, the pool is
  * split into TLSF_ARENA_COUNT independent sub-pools (arenas), each with its own
- * lock. Threads are mapped to arenas by a hash of their thread identifier, so
- * concurrent allocations from different threads typically hit different locks
- * with zero contention.
+ * lock. An allocation prefers the arena at mix(TLSF_THREAD_HINT()) modulo the
+ * live arena count, so allocations from different threads usually hit different
+ * locks. Nothing guarantees distinct arenas: hints can collide, and an arena
+ * that is locked or full is skipped for another. Where TLSF_THREAD_HINT()
+ * cannot identify a thread it is the constant 0, which funnels every thread to
+ * arena 0 and forfeits the whole benefit; see the lock abstraction below.
  *
  * Thread-safety contract (same as POSIX malloc/free):
  * - Different threads may call any API function concurrently.
@@ -46,7 +49,9 @@ extern "C" {
  *
  * Override ALL six lock macros together before including this header. When
  * providing custom locks, also define TLSF_THREAD_HINT() to return a
- * thread-specific unsigned integer for arena selection.
+ * thread-specific unsigned integer for arena selection. Without it the hint
+ * falls back to the constant 0, every thread selects arena 0, and the per-arena
+ * locking degenerates to a single lock.
  *
  * TLSF_LOCK_INIT must evaluate to an int: 0 on success, non-zero on failure.
  * tlsf_thread_init() checks it and aborts initialization if a lock cannot be
@@ -113,7 +118,7 @@ extern "C" {
 #elif defined(__GNUC__) && (__GNUC__ >= 8) && \
     (defined(__MINGW32__) || defined(__MINGW64__))
 #define TLSF_THREAD_WIN_SRWLOCK
-#elif
+#else
 #define TLSF_THREAD_WIN_CRSECTION
 #endif
 #endif
@@ -206,7 +211,8 @@ extern "C" {
  *                   arena can exhaust while others have space).
  *   Fewer arenas -> better memory utilization, higher contention.
  *
- * Must be >= 1. Power of two recommended for efficient hash mapping.
+ * Must be >= 1. Any value works: arena selection takes a modulo of the live
+ * arena count, so a power of two buys nothing here.
  */
 #ifndef TLSF_ARENA_COUNT
 #define TLSF_ARENA_COUNT 4
@@ -228,54 +234,92 @@ TLSF_STATIC_ASSERT((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
 TLSF_MSVC_ALIGN(TLSF_CACHELINE_SIZE) typedef struct {
     tlsf_t pool;
     TLSF_LOCK_T lock;
-    void *base;      /* Arena memory base (for pointer ownership) */
-    size_t capacity; /* Arena memory size in bytes */
+
+    /* Raw chunk handed to this arena. Ownership lookup tests against this
+     * range, not against pool.arena, so it deliberately covers the leading and
+     * trailing bytes that tlsf_pool_init() skipped for alignment.
+     */
+    void *base;
+    size_t capacity;
 } TLSF_GCC_ALIGN(TLSF_CACHELINE_SIZE) tlsf_arena_t;
 
 typedef struct {
     tlsf_arena_t arenas[TLSF_ARENA_COUNT];
-    int count; /* Initialized arena count (<= TLSF_ARENA_COUNT) */
+
+    /* Live arena count, at most TLSF_ARENA_COUNT. Zero before a successful
+     * init, after a failed init, and after tlsf_thread_destroy().
+     */
+    int count;
 } tlsf_thread_t;
 
 /**
  * Initialize from a contiguous memory region, splitting it into up to
- * TLSF_ARENA_COUNT independent sub-pools. The arena count may be reduced if the
- * region is too small to support all arenas.
+ * TLSF_ARENA_COUNT independent sub-pools, one lock each.
+ *
+ * The count is halved while each arena's share would fall below 256 bytes, so
+ * the result is TLSF_ARENA_COUNT divided by a power of two, at least 1. That is
+ * a heuristic, not a guarantee: a chunk can still be too small for a pool, and
+ * then the whole call fails.
+ *
+ * @ts must be uninitialized or already passed to tlsf_thread_destroy(). This
+ * call memsets @ts, so invoking it over live locks leaks them and is undefined.
  *
  * @ts : Thread-safe allocator instance
- * @mem : Memory region
+ * @mem : Memory region, which the caller continues to own
  * @bytes : Size of the memory region
  *
- * Return Total usable bytes across all arenas, or 0 on failure
+ * Return Total usable bytes across all arenas, or 0 if @ts or @mem is NULL,
+ * @bytes is 0, a lock cannot be created, or an arena pool cannot be built
  */
 size_t tlsf_thread_init(tlsf_thread_t *ts, void *mem, size_t bytes);
 
 /**
- * Destroy: release lock resources. Does not free the memory region passed to
- * tlsf_thread_init (caller retains ownership).
+ * Release the lock resources. The memory region given to tlsf_thread_init() is
+ * not freed; the caller still owns it.
+ *
+ * A NULL @ts is a no-op. Requires a quiescent instance. Afterwards the live
+ * arena count is zero, so every allocation fails until @ts is initialized
+ * again, and a second destroy does nothing.
  */
 void tlsf_thread_destroy(tlsf_thread_t *ts);
 
 /**
  * Thread-safe malloc. Tries the calling thread's preferred arena first, then
- * falls back to other arenas via non-blocking try-lock, then blocking acquire.
+ * the others by non-blocking try-lock, then by blocking acquire. Because memory
+ * is partitioned, this returns NULL only when no arena can satisfy @size, even
+ * if the free bytes summed across arenas would have been enough.
+ *
+ * A NULL @ts returns NULL.
  */
 void *tlsf_thread_malloc(tlsf_thread_t *ts, size_t size);
 
 /**
- * Thread-safe aligned allocation.
+ * Thread-safe aligned allocation. @align must be a non-zero power of two;
+ * anything else returns NULL, as does a NULL @ts. Arena search matches
+ * tlsf_thread_malloc().
  */
 void *tlsf_thread_aalloc(tlsf_thread_t *ts, size_t align, size_t size);
 
 /**
- * Thread-safe realloc. Attempts in-place realloc within the owning arena first;
- * falls back to cross-arena malloc + memcpy + free.
+ * Thread-safe realloc. Tries to resize inside the owning arena, then falls back
+ * to allocating elsewhere, copying, and freeing the original.
+ *
+ * A NULL @ptr allocates, and a zero @size frees @ptr and returns NULL. A @ptr
+ * outside every arena range returns NULL and frees nothing. As with
+ * tlsf_realloc(), a failure leaves @ptr allocated and intact, and the returned
+ * pointer need not equal @ptr.
  */
 void *tlsf_thread_realloc(tlsf_thread_t *ts, void *ptr, size_t size);
 
 /**
- * Thread-safe free. Finds the owning arena automatically via pointer-range
- * lookup (O(TLSF_ARENA_COUNT), effectively O(1)).
+ * Thread-safe free. Locates the owning arena by scanning the arena address
+ * ranges, which is linear in the live arena count and so effectively constant
+ * for the small counts this is meant for.
+ *
+ * A NULL @ts or @ptr is a no-op, and a @ptr outside every arena range is
+ * ignored. A @ptr that falls inside a range but is not a live allocation is
+ * undefined exactly as in tlsf_free(): the range check establishes ownership,
+ * not validity.
  */
 void tlsf_thread_free(tlsf_thread_t *ts, void *ptr);
 
@@ -287,17 +331,24 @@ void tlsf_thread_check(tlsf_thread_t *ts);
 
 /**
  * Aggregate statistics across all arenas. largest_free reports the single
- * largest free block in any arena.
+ * largest free block in any one arena, which is the largest allocation that can
+ * still succeed, not the sum of free space.
  *
  * Not an atomic snapshot: arena locks are taken one at a time, so concurrent
  * allocations in an already-visited arena are not reflected. Quiesce the other
  * threads first if you need an exact figure.
+ *
+ * Return 0 on success, -1 if @ts or @stats is NULL or if any arena fails
  */
 int tlsf_thread_stats(tlsf_thread_t *ts, tlsf_stats_t *stats);
 
 /**
- * Reset all arenas to initial state (bounded time). All outstanding pointers
- * become invalid.
+ * Reset every arena to its initial state in bounded time, discarding all
+ * allocations at once.
+ *
+ * A NULL @ts is a no-op. Each arena lock is taken in turn, but that does not
+ * make this safe against concurrent use: every pointer handed out so far
+ * becomes invalid, so the other threads must already be quiescent.
  */
 void tlsf_thread_reset(tlsf_thread_t *ts);
 

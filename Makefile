@@ -15,7 +15,8 @@ WP_FUNCTIONS = \
 	block_set_prev_free,block_set_free_at,free_list_link, \
 	free_list_unlink,bin_set_head, \
 	bins_reset,adjust_size,block_prev,block_poison_free,check_sentinel, \
-	bitmap_ffs,log2floor,block_next,round_block_size
+	bitmap_ffs,log2floor,block_next,round_block_size,align_offset,mapping, \
+	tlsf_pool_reset,remove_free_block,insert_free_block
 
 TARGETS = \
 	test \
