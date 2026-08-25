@@ -721,7 +721,7 @@ INLINE size_t round_block_size(size_t size)
  */
 /*@
   requires size > 0;
-  requires size <= TLSF_MAX_SIZE;
+  requires size < ((size_t) 1 << FL_MAX);
   requires \valid(fl);
   requires \valid(sl);
   requires \separated(fl, sl);
