@@ -879,6 +879,11 @@ static void static_pool_test(void)
         size_t usable = tlsf_pool_init(&t, combined, half);
         assert(usable > 0);
 
+        /* Reject the impossible range before forming mem + size. */
+        assert(tlsf_append_pool(&t, combined + half, SIZE_MAX) == 0);
+        assert(tlsf_append_pool(&t, combined + half,
+                                (size_t) 1 << _TLSF_FL_MAX) == 0);
+
         void *p1 = tlsf_malloc(&t, 1000);
         assert(p1);
 
