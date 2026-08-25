@@ -1324,10 +1324,16 @@ void *tlsf_malloc(tlsf_t *t, size_t size)
         if (sl_map) {
             uint32_t found_sl = bitmap_ffs(sl_map);
 
-            /* Use the bin's minimum size so mapping(block_size) returns the
-             * same bin on free.
+            /* Keep 'size' at the request. bitmap_ffs may land on a bin above
+             * the one the request maps to, and inflating the allocation to that
+             * bin's size hands out the whole block instead of trimming it,
+             * which is the defect block_find_free() documents below. The
+             * request is already ALIGN_SIZE-aligned and at least
+             * BLOCK_SIZE_MIN, and FL=0 bins are ALIGN_SIZE-spaced, so it is
+             * already on a bin boundary: a trimmed block still lands in the bin
+             * a same-size request will search, and an untrimmable one keeps its
+             * own size and maps to its own bin.
              */
-            size = (size_t) found_sl << ALIGN_SHIFT;
             tlsf_block_t *block = t->block[0][found_sl];
             remove_free_block(t, block, 0, found_sl);
             return block_use(t, block, size);

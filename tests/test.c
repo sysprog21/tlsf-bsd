@@ -981,6 +981,66 @@ static void pool_utilization_test(void)
  * backed with memory, so the boundary is exercised under a reduced
  * TLSF_MAX_POOL_BITS. CI covers 20 and 24.
  */
+static void small_bin_trim_test(void)
+{
+    printf("Small-bin trim test: ");
+    fflush(stdout);
+
+    /* The FL=0 fast path in tlsf_malloc() may satisfy a request from a bin
+     * above the one the request maps to. It must still trim the block to the
+     * request. Inflating the allocation to the found bin's size hands out the
+     * whole block, which is the defect block_find_free() documents for the
+     * generic path; the fast path has reintroduced it once already.
+     *
+     * Everything here is derived from _TLSF_FL_SHIFT rather than written as a
+     * literal. ALIGN_SIZE differs by word size, so the fast path covers sizes
+     * below 256 on 64-bit but below 128 on 32-bit, and a hard-coded seed size
+     * silently stops testing the fast path on one of them.
+     */
+    const size_t fast_path_max = (size_t) 1 << _TLSF_FL_SHIFT;
+    const size_t seed_req = fast_path_max - fast_path_max / 4;
+
+    static char pool[TLSF_TEST_POOL_CLAMP(64 * 1024)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+    /* Seed one large FL=0 free block, guarded so it cannot coalesce away. */
+    void *big = tlsf_malloc(&t, seed_req);
+    void *guard = tlsf_malloc(&t, 64);
+    assert(big && guard);
+    const size_t seeded = tlsf_usable_size(big);
+
+    /* Fail loudly if the seed did not land in FL=0: the rest of this test
+     * proves nothing about the fast path unless it did.
+     */
+    assert(seeded >= seed_req);
+    assert(seeded < fast_path_max);
+    tlsf_free(&t, big);
+    tlsf_check(&t);
+
+    /* A minimal request must not swallow the seeded block. */
+    void *probe = tlsf_malloc(&t, 1);
+    assert(probe);
+    const size_t got = tlsf_usable_size(probe);
+    assert(got < seeded);
+
+    /* The trimmed remainder must still be allocatable. TLSF_TEST_BLOCK_COST
+     * over-subtracts, which only makes the request more conservative.
+     */
+    assert(seeded - got > TLSF_TEST_BLOCK_COST);
+    void *rest = tlsf_malloc(&t, seeded - got - TLSF_TEST_BLOCK_COST);
+    assert(rest);
+    tlsf_check(&t);
+
+    tlsf_free(&t, rest);
+    tlsf_free(&t, probe);
+    tlsf_free(&t, guard);
+    tlsf_check(&t);
+
+    printf("%zu-byte FL=0 bin served a minimal request as %zu bytes, done\n",
+           seeded, got);
+}
+
 static void pool_ceiling_test(void)
 {
     printf("Pool ceiling test: ");
@@ -1206,6 +1266,9 @@ int main(void)
 
     /* Run free/realloc address reuse test */
     reuse_same_address_test();
+
+    /* Run small-bin trim test */
+    small_bin_trim_test();
 
     /* Run pool ceiling test */
     pool_ceiling_test();
