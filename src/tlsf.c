@@ -129,7 +129,7 @@
  */
 #define BLOCK_PAYLOAD_OVERHEAD (sizeof(struct tlsf_block *) * 3)
 
-/* Forcing always_inline costs 168 bytes of .text over plain `static inline` at
+/* Forcing always_inline costs 168 bytes of .text over plain 'static inline' at
  * -O2 (6236 vs 6068, clang/arm64), because the compiler already inlines these
  * helpers on its own. Median malloc_worst latency is identical at 42 ticks
  * either way; the tails are scheduler noise. Override with -DINLINE="static
@@ -434,7 +434,7 @@ INLINE size_t align_up(size_t x, size_t align)
  *
  * Instead, we compute the alignment offset and use pointer arithmetic:
  *   p + (aligned_addr - addr)
- * This preserves provenance because the result is derived from `p`.
+ * This preserves provenance because the result is derived from 'p'.
  *
  * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
  */
@@ -719,7 +719,7 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
 
     /* SL: linear index for small, logarithmic for large. Clamp the shift to
      * avoid undefined behavior when t < SL_SHIFT; the garbage result is masked
-     * out by `small`.
+     * out by 'small'.
      */
     uint32_t shift =
         (t - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
@@ -897,14 +897,14 @@ INLINE tlsf_block_t *block_split(tlsf_block_t *block, size_t size)
     return rest;
 }
 
-/* Absorb a free block's storage into an adjacent previous free block. `block`
+/* Absorb a free block's storage into an adjacent previous free block. 'block'
  * is not const: its successor is resolved through it, and that successor is
  * then written. Taking it const would only move a const-discarding cast inside.
  *
- * Resolving next from `block` before growing `prev` (rather than from `prev`
+ * Resolving next from 'block' before growing 'prev' (rather than from 'prev'
  * after, as the size arithmetic would also allow) keeps the successor lookup
  * off a header that is mid-update. The two agree only because a block's
- * successor sits at `block + BLOCK_HEADER_OFFSET + block_size(block)` and
+ * successor sits at 'block + BLOCK_HEADER_OFFSET + block_size(block)' and
  * BLOCK_HEADER_OFFSET == BLOCK_OVERHEAD, which the static assert above pins.
  */
 INLINE tlsf_block_t *block_absorb(tlsf_block_t *prev, tlsf_block_t *block)
@@ -1050,8 +1050,8 @@ static void bins_reset(tlsf_t *t)
             t->block[i][j] = &t->block_null;
 }
 
-/* Lay out a pool as a single free block of `free_size` payload bytes followed
- * by the terminating zero-size sentinel. `start` is the first payload byte; the
+/* Lay out a pool as a single free block of 'free_size' payload bytes followed
+ * by the terminating zero-size sentinel. 'start' is the first payload byte; the
  * block header sits one word below it, and that block's prev field lies outside
  * the pool and is never read.
  */

@@ -53,7 +53,7 @@ static void *arena_alloc(tlsf_arena_t *a, size_t align, size_t size)
                  : tlsf_malloc(&a->pool, size);
 }
 
-/* Try to allocate from arenas other than `skip`, using non-blocking try-lock
+/* Try to allocate from arenas other than 'skip', using non-blocking try-lock
  * first, then blocking acquire.
  *
  * Returns NULL if all arenas are exhausted.

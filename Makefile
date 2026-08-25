@@ -3,8 +3,8 @@ OUT = build
 FRAMAC ?= frama-c
 
 # Leaf helpers carrying ACSL contracts. No caller of these is in the list yet,
-# so every `requires` here is an assumed hypothesis rather than a discharged
-# one: `make verify` proves the helpers consistent with their own contracts,
+# so every 'requires' here is an assumed hypothesis rather than a discharged
+# one: 'make verify' proves the helpers consistent with their own contracts,
 # not that the allocator establishes those contracts at the call sites. Extend
 # upward (block_split, block_absorb, block_set_free, ...) to close that gap.
 WP_FUNCTIONS = \
