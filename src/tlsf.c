@@ -481,6 +481,8 @@ INLINE tlsf_block_t *block_from_payload(void *ptr)
  */
 /*@
   requires tlsf_aligned_header(block);
+  assigns *((char *)block + BLOCK_HEADER_OFFSET + BLOCK_OVERHEAD +
+            (0 .. block->header - block->header % ALIGN_SIZE - 1));
 */
 INLINE void block_poison_free(tlsf_block_t *block)
 {

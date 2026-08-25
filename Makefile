@@ -86,7 +86,8 @@ check: $(TARGETS) $(THREAD_TARGETS)
 # Two classes of WP warning are expected and cannot be annotated away:
 #   "Skipped RTE guards" for \aligned and \valid_function, which the Typed
 #   model does not support, and "Cast with incompatible pointers types" for the
-#   char* block arithmetic in block_payload()/to_block(). The Bytes model models
+#   char* block arithmetic in block_payload()/to_block() and in the assigns
+#   clause of block_poison_free(). The Bytes model models
 #   those casts natively and silences the warnings, but it is experimental and
 #   leaves two goals unproved, so Typed+nocast stays.
 verify:
