@@ -736,7 +736,16 @@ static void static_pool_test(void)
         void *p3 = tlsf_realloc(&t, p2, 50);
         assert(p3);
 
-        tlsf_free(&t, p3);
+        /* The two C-standard realloc aliases. Both are reachable through the
+         * core API, but until now only tests/test_thread.c drove them, so a
+         * build without the threading wrapper left them untested.
+         */
+        assert(tlsf_realloc(&t, p3, 0) == NULL);
+
+        void *p4 = tlsf_realloc(&t, NULL, 64);
+        assert(p4);
+
+        tlsf_free(&t, p4);
         tlsf_check(&t);
     }
     printf(".");
