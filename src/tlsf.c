@@ -192,6 +192,14 @@ TLSF_STATIC_ASSERT(FL_COUNT == _TLSF_FL_COUNT, "invalid level configuration");
 TLSF_STATIC_ASSERT(SL_COUNT == _TLSF_SL_COUNT, "invalid level configuration");
 TLSF_STATIC_ASSERT(TLSF_SPLIT_THRESHOLD >= BLOCK_SIZE_MIN,
                    "split threshold must be at least minimum block size");
+
+/* Without an upper bound, a documented-but-absurd threshold wraps
+ * BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size in block_can_trim() and makes it
+ * accept blocks it must not.
+ */
+TLSF_STATIC_ASSERT(TLSF_SPLIT_THRESHOLD <= BLOCK_SIZE_MAX,
+                   "split threshold must not overflow block size arithmetic");
+
 TLSF_STATIC_ASSERT(_TLSF_FL_COUNT >= 1,
                    "TLSF_MAX_POOL_BITS too small for this architecture");
 TLSF_STATIC_ASSERT(FL_MAX < _TLSF_SIZE_WIDTH,
@@ -581,14 +589,19 @@ MAYBE_UNUSED INLINE bool block_can_split(const tlsf_block_t *block, size_t size)
  */
 /*@
   requires tlsf_aligned_header(block);
-  requires size <= SIZE_MAX - BLOCK_OVERHEAD - TLSF_SPLIT_THRESHOLD;
   assigns \nothing;
   ensures \result ==>
             block->header >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
 */
 INLINE bool block_can_trim(const tlsf_block_t *block, size_t size)
 {
-    return block_size(block) >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
+    /* Subtraction form so the comparison cannot wrap for any 'size', even if
+     * the TLSF_SPLIT_THRESHOLD bound above is later relaxed. min_total is a
+     * compile-time constant the static assert keeps well below SIZE_MAX.
+     */
+    size_t bsize = block_size(block);
+    const size_t min_total = BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD;
+    return bsize >= min_total && size <= bsize - min_total;
 }
 
 /* The flag nibble is header % ALIGN_SIZE: bit 0 is FREE, bit 1 is PREV_FREE.
