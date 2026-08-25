@@ -129,7 +129,7 @@
  */
 #define BLOCK_PAYLOAD_OVERHEAD (sizeof(struct tlsf_block *) * 3)
 
-/* Forcing always_inline costs 168 bytes of .text over plain `static inline` at
+/* Forcing always_inline costs 168 bytes of .text over plain 'static inline' at
  * -O2 (6236 vs 6068, clang/arm64), because the compiler already inlines these
  * helpers on its own. Median malloc_worst latency is identical at 42 ticks
  * either way; the tails are scheduler noise. Override with -DINLINE="static
@@ -192,6 +192,14 @@ TLSF_STATIC_ASSERT(FL_COUNT == _TLSF_FL_COUNT, "invalid level configuration");
 TLSF_STATIC_ASSERT(SL_COUNT == _TLSF_SL_COUNT, "invalid level configuration");
 TLSF_STATIC_ASSERT(TLSF_SPLIT_THRESHOLD >= BLOCK_SIZE_MIN,
                    "split threshold must be at least minimum block size");
+
+/* Without an upper bound, a documented-but-absurd threshold wraps
+ * BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size in block_can_trim() and makes it
+ * accept blocks it must not.
+ */
+TLSF_STATIC_ASSERT(TLSF_SPLIT_THRESHOLD <= BLOCK_SIZE_MAX,
+                   "split threshold must not overflow block size arithmetic");
+
 TLSF_STATIC_ASSERT(_TLSF_FL_COUNT >= 1,
                    "TLSF_MAX_POOL_BITS too small for this architecture");
 TLSF_STATIC_ASSERT(FL_MAX < _TLSF_SIZE_WIDTH,
@@ -434,7 +442,7 @@ INLINE size_t align_up(size_t x, size_t align)
  *
  * Instead, we compute the alignment offset and use pointer arithmetic:
  *   p + (aligned_addr - addr)
- * This preserves provenance because the result is derived from `p`.
+ * This preserves provenance because the result is derived from 'p'.
  *
  * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
  */
@@ -481,6 +489,8 @@ INLINE tlsf_block_t *block_from_payload(void *ptr)
  */
 /*@
   requires tlsf_aligned_header(block);
+  assigns *((char *)block + BLOCK_HEADER_OFFSET + BLOCK_OVERHEAD +
+            (0 .. block->header - block->header % ALIGN_SIZE - 1));
 */
 INLINE void block_poison_free(tlsf_block_t *block)
 {
@@ -579,14 +589,19 @@ MAYBE_UNUSED INLINE bool block_can_split(const tlsf_block_t *block, size_t size)
  */
 /*@
   requires tlsf_aligned_header(block);
-  requires size <= SIZE_MAX - BLOCK_OVERHEAD - TLSF_SPLIT_THRESHOLD;
   assigns \nothing;
   ensures \result ==>
             block->header >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
 */
 INLINE bool block_can_trim(const tlsf_block_t *block, size_t size)
 {
-    return block_size(block) >= BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD + size;
+    /* Subtraction form so the comparison cannot wrap for any 'size', even if
+     * the TLSF_SPLIT_THRESHOLD bound above is later relaxed. min_total is a
+     * compile-time constant the static assert keeps well below SIZE_MAX.
+     */
+    size_t bsize = block_size(block);
+    const size_t min_total = BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD;
+    return bsize >= min_total && size <= bsize - min_total;
 }
 
 /* The flag nibble is header % ALIGN_SIZE: bit 0 is FREE, bit 1 is PREV_FREE.
@@ -719,7 +734,7 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
 
     /* SL: linear index for small, logarithmic for large. Clamp the shift to
      * avoid undefined behavior when t < SL_SHIFT; the garbage result is masked
-     * out by `small`.
+     * out by 'small'.
      */
     uint32_t shift =
         (t - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
@@ -897,14 +912,14 @@ INLINE tlsf_block_t *block_split(tlsf_block_t *block, size_t size)
     return rest;
 }
 
-/* Absorb a free block's storage into an adjacent previous free block. `block`
+/* Absorb a free block's storage into an adjacent previous free block. 'block'
  * is not const: its successor is resolved through it, and that successor is
  * then written. Taking it const would only move a const-discarding cast inside.
  *
- * Resolving next from `block` before growing `prev` (rather than from `prev`
+ * Resolving next from 'block' before growing 'prev' (rather than from 'prev'
  * after, as the size arithmetic would also allow) keeps the successor lookup
  * off a header that is mid-update. The two agree only because a block's
- * successor sits at `block + BLOCK_HEADER_OFFSET + block_size(block)` and
+ * successor sits at 'block + BLOCK_HEADER_OFFSET + block_size(block)' and
  * BLOCK_HEADER_OFFSET == BLOCK_OVERHEAD, which the static assert above pins.
  */
 INLINE tlsf_block_t *block_absorb(tlsf_block_t *prev, tlsf_block_t *block)
@@ -1050,8 +1065,8 @@ static void bins_reset(tlsf_t *t)
             t->block[i][j] = &t->block_null;
 }
 
-/* Lay out a pool as a single free block of `free_size` payload bytes followed
- * by the terminating zero-size sentinel. `start` is the first payload byte; the
+/* Lay out a pool as a single free block of 'free_size' payload bytes followed
+ * by the terminating zero-size sentinel. 'start' is the first payload byte; the
  * block header sits one word below it, and that block's prev field lies outside
  * the pool and is never read.
  */
@@ -1309,10 +1324,16 @@ void *tlsf_malloc(tlsf_t *t, size_t size)
         if (sl_map) {
             uint32_t found_sl = bitmap_ffs(sl_map);
 
-            /* Use the bin's minimum size so mapping(block_size) returns the
-             * same bin on free.
+            /* Keep 'size' at the request. bitmap_ffs may land on a bin above
+             * the one the request maps to, and inflating the allocation to that
+             * bin's size hands out the whole block instead of trimming it,
+             * which is the defect block_find_free() documents below. The
+             * request is already ALIGN_SIZE-aligned and at least
+             * BLOCK_SIZE_MIN, and FL=0 bins are ALIGN_SIZE-spaced, so it is
+             * already on a bin boundary: a trimmed block still lands in the bin
+             * a same-size request will search, and an untrimmable one keeps its
+             * own size and maps to its own bin.
              */
-            size = (size_t) found_sl << ALIGN_SHIFT;
             tlsf_block_t *block = t->block[0][found_sl];
             remove_free_block(t, block, 0, found_sl);
             return block_use(t, block, size);

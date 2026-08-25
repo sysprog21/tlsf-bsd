@@ -37,23 +37,107 @@ static inline size_t get_page_size(void)
     GetSystemInfo(&si);
     return (size_t) si.dwPageSize;
 #else
-    return (size_t) sysconf(_SC_PAGESIZE);
+    long page_size = sysconf(_SC_PAGESIZE);
+
+    /* Zero is as unusable as a negative return, since PAGE is a divisor below.
+     * Report with fputs rather than perror: sysconf may return -1 for an
+     * indeterminate limit without setting errno.
+     */
+    if (page_size <= 0) {
+        fputs("sysconf(_SC_PAGESIZE) returned an unusable page size\n", stderr);
+        exit(EXIT_FAILURE);
+    }
+    return (size_t) page_size;
 #endif
 }
 
+/* Size the virtual address space window that tlsf_resize() hands out. Called
+ * from tlsf_resize() itself so PAGE can never be read before it is set. 64-bit:
+ * 1 GB is sufficient and safe. 32-bit: 128 MB to avoid VA space exhaustion
+ * (user space is 2-3 GB).
+ */
+static void page_init(void)
+{
+    if (PAGE)
+        return;
+    PAGE = get_page_size();
+#if _TLSF_SIZE_WIDTH == 64 || defined(__LP64__) || defined(_LP64)
+    MAX_PAGES = ((size_t) 1 << 30) / PAGE;
+#else
+    MAX_PAGES = ((size_t) 128 << 20) / PAGE;
+#endif
+}
+
+/* Platform primitives behind tlsf_resize(). Each does one job: reserve the
+ * address window, hand physical pages back, and make pages writable before the
+ * allocator touches them. Keeping them this small is what lets the resize
+ * driver below exist in one copy instead of two that must be kept in step.
+ *
+ * pages_reserve() reports failure as NULL on both platforms, so the POSIX
+ * MAP_FAILED sentinel never escapes it and cannot be mistaken for an arena.
+ */
 #if defined(_WIN32) || defined(WIN32) || defined(__WIN32__) || defined(_WIN64)
+/* VirtualAlloc with MEM_RESERVE is the analogue of mmap with MAP_NORESERVE. */
+static void *pages_reserve(size_t bytes)
+{
+    void *addr = VirtualAlloc(NULL, bytes, MEM_RESERVE, PAGE_READWRITE);
+    if (!addr)
+        fprintf(stderr, "VirtualAlloc reserve failed: %lu\n", GetLastError());
+    return addr;
+}
+
+/* MEM_DECOMMIT is the analogue of madvise(MADV_DONTNEED): the address stays
+ * reserved, the physical pages go back. Best-effort, see pages_release() use.
+ */
+static void pages_release(void *addr, size_t bytes)
+{
+    if (!VirtualFree(addr, bytes, MEM_DECOMMIT))
+        fprintf(stderr, "VirtualFree decommit failed: %lu\n", GetLastError());
+}
+
+static bool pages_commit(void *addr, size_t bytes)
+{
+    if (VirtualAlloc(addr, bytes, MEM_COMMIT, PAGE_READWRITE))
+        return true;
+    fprintf(stderr, "VirtualAlloc commit failed: %lu\n", GetLastError());
+    return false;
+}
+#else
+static void *pages_reserve(size_t bytes)
+{
+    void *addr = mmap(0, bytes, PROT_READ | PROT_WRITE,
+                      MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
+    if (addr == MAP_FAILED) {
+        perror("mmap");
+        return NULL;
+    }
+    return addr;
+}
+
+static void pages_release(void *addr, size_t bytes)
+{
+    if (madvise(addr, bytes, MADV_DONTNEED) != 0)
+        perror("madvise");
+}
+
+static bool pages_commit(void *addr, size_t bytes)
+{
+    /* Nothing to do: the MAP_NORESERVE mapping is already writable and the
+     * kernel backs each page on first touch.
+     */
+    (void) addr;
+    (void) bytes;
+    return true;
+}
+#endif
+
 void *tlsf_resize(tlsf_t *t, size_t req_size)
 {
     (void) t;
+    page_init();
 
-    /* This is analogue mmap with flag MAP_NORESERVE to VirtualAlloc with
-     * MEM_RESERVE
-     */
     if (!start_addr) {
-        start_addr = VirtualAlloc(NULL, MAX_PAGES * PAGE,
-                                  MEM_RESERVE, /* Only reserve address space */
-                                  PAGE_READWRITE /* Rights for read and write */
-        );
+        start_addr = pages_reserve(MAX_PAGES * PAGE);
         if (!start_addr)
             return NULL;
     }
@@ -64,52 +148,19 @@ void *tlsf_resize(tlsf_t *t, size_t req_size)
 
     if (req_pages != curr_pages) {
         if (req_pages < curr_pages) {
-            /* Analogue for madvise(..., MADV_DONTNEED) to VirtualFree with
-             * MEM_DECOMMIT Free physical memory (commit), with reserved
-             * addresses
+            /* Best-effort: a failed release leaves the pages resident but does
+             * not affect allocator state, so curr_pages advances either way.
              */
-            VirtualFree((char *) start_addr + PAGE * req_pages,
-                        (size_t) (curr_pages - req_pages) * PAGE,
-                        MEM_DECOMMIT /* physical pages to zero */
-            );
-        } else {
-            /* Commit reserved memory */
-            void *commit_ptr = VirtualAlloc(
-                start_addr,                   /* base address is the same */
-                req_pages * PAGE, MEM_COMMIT, /* Commit new pages */
-                PAGE_READWRITE);
-            if (!commit_ptr)
-                return NULL;
+            pages_release((char *) start_addr + PAGE * req_pages,
+                          (curr_pages - req_pages) * PAGE);
+        } else if (!pages_commit(start_addr, req_pages * PAGE)) {
+            return NULL;
         }
-
         curr_pages = req_pages;
     }
 
     return start_addr;
 }
-#else
-void *tlsf_resize(tlsf_t *t, size_t req_size)
-{
-    (void) t;
-
-    if (!start_addr)
-        start_addr = mmap(0, MAX_PAGES * PAGE, PROT_READ | PROT_WRITE,
-                          MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
-
-    size_t req_pages = (req_size + PAGE - 1) / PAGE;
-    if (req_pages > MAX_PAGES)
-        return 0;
-
-    if (req_pages != curr_pages) {
-        if (req_pages < curr_pages)
-            madvise((char *) start_addr + PAGE * req_pages,
-                    (size_t) (curr_pages - req_pages) * PAGE, MADV_DONTNEED);
-        curr_pages = req_pages;
-    }
-
-    return start_addr;
-}
-#endif
 
 static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 {
@@ -152,10 +203,16 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         if (i % check_stride == 0)
             tlsf_check(t);
 
-        /* Fill with magic (only when testing up to 1MB). */
+        /* Fill with magic (only when testing up to 1MB). The fill runs over the
+         * usable size rather than the requested length, so it doubles as the
+         * check on tlsf_usable_size(): under-reporting trips the assert, and
+         * over-reporting corrupts a neighbour that tlsf_check() then sees.
+         */
         uint8_t *data = (uint8_t *) p[i];
+        size_t usable = tlsf_usable_size(data);
+        assert(usable >= len);
         if (spacelen <= 1024 * 1024)
-            memset(data, 0, len);
+            memset(data, 0, usable);
         data[0] = 0xa5;
 
         i++;
@@ -924,6 +981,66 @@ static void pool_utilization_test(void)
  * backed with memory, so the boundary is exercised under a reduced
  * TLSF_MAX_POOL_BITS. CI covers 20 and 24.
  */
+static void small_bin_trim_test(void)
+{
+    printf("Small-bin trim test: ");
+    fflush(stdout);
+
+    /* The FL=0 fast path in tlsf_malloc() may satisfy a request from a bin
+     * above the one the request maps to. It must still trim the block to the
+     * request. Inflating the allocation to the found bin's size hands out the
+     * whole block, which is the defect block_find_free() documents for the
+     * generic path; the fast path has reintroduced it once already.
+     *
+     * Everything here is derived from _TLSF_FL_SHIFT rather than written as a
+     * literal. ALIGN_SIZE differs by word size, so the fast path covers sizes
+     * below 256 on 64-bit but below 128 on 32-bit, and a hard-coded seed size
+     * silently stops testing the fast path on one of them.
+     */
+    const size_t fast_path_max = (size_t) 1 << _TLSF_FL_SHIFT;
+    const size_t seed_req = fast_path_max - fast_path_max / 4;
+
+    static char pool[TLSF_TEST_POOL_CLAMP(64 * 1024)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+    /* Seed one large FL=0 free block, guarded so it cannot coalesce away. */
+    void *big = tlsf_malloc(&t, seed_req);
+    void *guard = tlsf_malloc(&t, 64);
+    assert(big && guard);
+    const size_t seeded = tlsf_usable_size(big);
+
+    /* Fail loudly if the seed did not land in FL=0: the rest of this test
+     * proves nothing about the fast path unless it did.
+     */
+    assert(seeded >= seed_req);
+    assert(seeded < fast_path_max);
+    tlsf_free(&t, big);
+    tlsf_check(&t);
+
+    /* A minimal request must not swallow the seeded block. */
+    void *probe = tlsf_malloc(&t, 1);
+    assert(probe);
+    const size_t got = tlsf_usable_size(probe);
+    assert(got < seeded);
+
+    /* The trimmed remainder must still be allocatable. TLSF_TEST_BLOCK_COST
+     * over-subtracts, which only makes the request more conservative.
+     */
+    assert(seeded - got > TLSF_TEST_BLOCK_COST);
+    void *rest = tlsf_malloc(&t, seeded - got - TLSF_TEST_BLOCK_COST);
+    assert(rest);
+    tlsf_check(&t);
+
+    tlsf_free(&t, rest);
+    tlsf_free(&t, probe);
+    tlsf_free(&t, guard);
+    tlsf_check(&t);
+
+    printf("%zu-byte FL=0 bin served a minimal request as %zu bytes, done\n",
+           seeded, got);
+}
+
 static void pool_ceiling_test(void)
 {
     printf("Pool ceiling test: ");
@@ -1114,16 +1231,6 @@ static void pool_reset_test(void)
 
 int main(void)
 {
-    PAGE = get_page_size();
-
-    /* Virtual address space reservation for testing. 64-bit: 1GB is sufficient
-     * and safe 32-bit: 128MB to avoid VA space exhaustion (user space is 2-3GB)
-     */
-#if _TLSF_SIZE_WIDTH == 64 || defined(__LP64__) || defined(_LP64)
-    MAX_PAGES = ((size_t) 1 << 30) / PAGE; /* 1 GB */
-#else
-    MAX_PAGES = ((size_t) 128 << 20) / PAGE; /* 128 MB */
-#endif
     tlsf_t t = TLSF_INIT;
 
     const char *seed_env = getenv("TLSF_TEST_SEED");
@@ -1159,6 +1266,9 @@ int main(void)
 
     /* Run free/realloc address reuse test */
     reuse_same_address_test();
+
+    /* Run small-bin trim test */
+    small_bin_trim_test();
 
     /* Run pool ceiling test */
     pool_ceiling_test();

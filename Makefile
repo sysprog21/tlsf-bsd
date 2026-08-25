@@ -3,8 +3,8 @@ OUT = build
 FRAMAC ?= frama-c
 
 # Leaf helpers carrying ACSL contracts. No caller of these is in the list yet,
-# so every `requires` here is an assumed hypothesis rather than a discharged
-# one: `make verify` proves the helpers consistent with their own contracts,
+# so every 'requires' here is an assumed hypothesis rather than a discharged
+# one: 'make verify' proves the helpers consistent with their own contracts,
 # not that the allocator establishes those contracts at the call sites. Extend
 # upward (block_split, block_absorb, block_set_free, ...) to close that gap.
 WP_FUNCTIONS = \
@@ -49,7 +49,10 @@ OBJS := $(addprefix $(OUT)/,$(OBJS))
 
 THREAD_OBJS = $(OUT)/tlsf_thread.o
 
-deps := $(OBJS:%.o=%.o.d)
+# Every rule that passes -MMD -MF must be listed, or 'clean' leaves its dep
+# file behind. $(OUT)/test is deliberately absent: its rule emits no dep file.
+deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
+	$(OUT)/bench.d $(OUT)/wcet.d $(THREAD_TARGETS:%=%.d)
 
 $(OUT)/test: $(OBJS) tests/test.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -86,7 +89,8 @@ check: $(TARGETS) $(THREAD_TARGETS)
 # Two classes of WP warning are expected and cannot be annotated away:
 #   "Skipped RTE guards" for \aligned and \valid_function, which the Typed
 #   model does not support, and "Cast with incompatible pointers types" for the
-#   char* block arithmetic in block_payload()/to_block(). The Bytes model models
+#   char* block arithmetic in block_payload()/to_block() and in the assigns
+#   clause of block_poison_free(). The Bytes model models
 #   those casts natively and silences the warnings, but it is experimental and
 #   leaves two goals unproved, so Typed+nocast stays.
 verify:
@@ -122,6 +126,7 @@ clean:
 	$(RM) $(TARGETS) $(THREAD_TARGETS) $(OBJS) $(THREAD_OBJS) $(deps)
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
+	$(RM) -r $(OUT)/*.dSYM
 
 .PHONY: all check clean verify bench bench-quick wcet wcet-quick wcet-plot
 

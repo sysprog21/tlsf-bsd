@@ -150,7 +150,7 @@ typedef struct {
     uint32_t fl, sl[_TLSF_FL_COUNT];
 
     /* Fixed pool: memory is caller-owned (tlsf_pool_init) and the arena can
-     * neither grow nor shrink. Orthogonal to `arena`, which is always the
+     * neither grow nor shrink. Orthogonal to 'arena', which is always the
      * current base address once the pool has any memory.
      */
     bool fixed;
