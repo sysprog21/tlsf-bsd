@@ -434,24 +434,41 @@ INLINE size_t align_up(size_t x, size_t align)
     return (((x - 1) | (align - 1)) + 1);
 }
 
+/* Bytes that must be added to 'p' to reach the next 'align' boundary.
+ *
+ * Callers that cannot yet prove the boundary lies inside their buffer need this
+ * offset on its own: forming the aligned pointer first would run past the end
+ * of an undersized object before the bounds check can reject it.
+ *
+ * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
+ */
+/*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
+  assigns \nothing;
+*/
+INLINE size_t align_offset(const char *p, size_t align)
+{
+    ASSERT(align, "alignment must be non-zero");
+    ASSERT(!(align & (align - 1)), "must align to a power of two");
+    return (size_t) (-(uintptr_t) p) & (align - 1);
+}
+
 /* Align pointer while preserving pointer provenance.
  *
  * The naive approach '(char *) align_up((size_t) p, align)' loses provenance
  * because the integer-to-pointer cast creates a pointer with no derivation
  * history. This causes issues with Miri, UBSan, and strict aliasing analysis.
- *
- * Instead, we compute the alignment offset and use pointer arithmetic:
- *   p + (aligned_addr - addr)
- * This preserves provenance because the result is derived from 'p'.
- *
- * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
+ * Adding the offset to 'p' keeps the result derived from 'p'.
  */
-/*@ assigns \result \from p, align; */
+/*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
+  assigns \result \from p, align;
+*/
 INLINE char *align_ptr(char *p, size_t align)
 {
-    uintptr_t addr = (uintptr_t) p;
-    uintptr_t aligned_addr = align_up(addr, align);
-    return p + (aligned_addr - addr);
+    return p + align_offset(p, align);
 }
 
 /*@ assigns \result \from block; */
