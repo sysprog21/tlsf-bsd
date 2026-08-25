@@ -49,7 +49,10 @@ OBJS := $(addprefix $(OUT)/,$(OBJS))
 
 THREAD_OBJS = $(OUT)/tlsf_thread.o
 
-deps := $(OBJS:%.o=%.o.d)
+# Every rule that passes -MMD -MF must be listed, or 'clean' leaves its dep
+# file behind. $(OUT)/test is deliberately absent: its rule emits no dep file.
+deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
+	$(OUT)/bench.d $(OUT)/wcet.d $(THREAD_TARGETS:%=%.d)
 
 $(OUT)/test: $(OBJS) tests/test.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -123,6 +126,7 @@ clean:
 	$(RM) $(TARGETS) $(THREAD_TARGETS) $(OBJS) $(THREAD_OBJS) $(deps)
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
+	$(RM) -r $(OUT)/*.dSYM
 
 .PHONY: all check clean verify bench bench-quick wcet wcet-quick wcet-plot
 
