@@ -816,9 +816,12 @@ static void static_pool_test(void)
         size_t aligned_usable = tlsf_pool_init(&ta, raw, 4096);
         assert(aligned_usable - usable == align);
 
-        /* A span shorter than the adjustment must be rejected. This pins the
-         * return contract, not the 'bytes <= adj' guard: drop that guard and
-         * the later BLOCK_SIZE_MAX check still rejects the underflowed span.
+        /* A span too short to reach the alignment boundary must be rejected.
+         * This pins the return contract, not the 'bytes <= adj' guard: drop
+         * that guard and this input still returns 0, because bytes == adj
+         * leaves pool_bytes at 0 and the lower-bound check rejects it. Only a
+         * strictly shorter span underflows far enough to reach the
+         * BLOCK_SIZE_MAX test.
          */
         tlsf_t tb;
         assert(tlsf_pool_init(&tb, raw + 1, align - 1) == 0);

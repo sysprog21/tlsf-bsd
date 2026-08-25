@@ -460,10 +460,18 @@ INLINE size_t align_offset(const char *p, size_t align)
  * because the integer-to-pointer cast creates a pointer with no derivation
  * history. This causes issues with Miri, UBSan, and strict aliasing analysis.
  * Adding the offset to 'p' keeps the result derived from 'p'.
+ *
+ * The caller must own a full alignment window at 'p'. Forming a pointer past
+ * the end of the object is undefined even when it is never dereferenced, and
+ * the boundary can sit up to 'align - 1' bytes ahead. A caller that cannot
+ * promise that window yet wants align_offset() instead, which yields the
+ * distance as a number so the span can be bounds-checked before any pointer is
+ * built. That is why tlsf_pool_init() uses align_offset().
  */
 /*@
   requires align > 0;
   requires (align & (align - 1)) == 0;
+  requires \valid_read((char *) p + (0 .. align - 1));
   assigns \result \from p, align;
 */
 INLINE char *align_ptr(char *p, size_t align)
