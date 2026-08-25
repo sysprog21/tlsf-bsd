@@ -763,6 +763,25 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
     ASSERT(*sl < SL_COUNT, "wrong second level");
 }
 
+/* The preconditions below mirror the runtime asserts and are what discharge the
+ * shift and array-index obligations on 't->sl[*fl]' and '~0U << *sl'.
+ *
+ * Deliberately kept out of WP_FUNCTIONS: 35 of 36 goals prove, and the last one
+ * is the bitmap_ffs precondition on line 'sl_map = t->sl[*fl]'. Proving it
+ * needs the coherence invariant "a set bit in t->fl implies a nonzero
+ * t->sl[i]", which in turn needs a postcondition relating bitmap_ffs to the bit
+ * it found. bitmap_ffs is __builtin_ctz here, and Alt-Ergo does not discharge
+ * that bit-level link. Add this function to WP_FUNCTIONS only together with
+ * that invariant.
+ */
+/*@
+  requires \valid(t);
+  requires \valid(fl) && \valid(sl);
+  requires \separated(fl, sl);
+  requires *fl < FL_COUNT;
+  requires *sl < SL_COUNT;
+  assigns *fl, *sl;
+*/
 INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
 {
     ASSERT(*fl < FL_COUNT, "wrong first level");
@@ -830,6 +849,18 @@ INLINE void free_list_unlink(tlsf_block_t *prev, tlsf_block_t *next)
 /* Remove a free block from the free list. Unconditional writes: prev/next may
  * be &t->block_null (sentinel), in which case the writes are harmless.
  */
+/*@
+  requires \valid(t);
+  requires \valid(block);
+  requires fl < FL_COUNT;
+  requires sl < SL_COUNT;
+  requires \valid(block->prev_free);
+  requires \valid(block->next_free);
+  requires block->prev_free == block->next_free ||
+          \separated(block->prev_free, block->next_free);
+  assigns block->prev_free->next_free, block->next_free->prev_free;
+  assigns t->block[fl][sl], t->sl[fl], t->fl;
+*/
 INLINE void remove_free_block(tlsf_t *t,
                               tlsf_block_t *block,
                               uint32_t fl,
@@ -883,6 +914,18 @@ INLINE void free_list_link(tlsf_block_t *block,
  * Unconditional write: current may be &t->block_null (sentinel), in which case
  * the write to current->prev_free is harmless.
  */
+/*@
+  requires \valid(t);
+  requires \valid(block);
+  requires fl < FL_COUNT;
+  requires sl < SL_COUNT;
+  requires \valid(t->block[fl][sl]);
+  requires \separated(block, t->block[fl][sl]);
+  requires \separated(block, &t->block_null);
+  assigns block->next_free, block->prev_free;
+  assigns t->block[fl][sl]->prev_free;
+  assigns t->block[fl][sl], t->fl, t->sl[fl];
+*/
 INLINE void insert_free_block(tlsf_t *t,
                               tlsf_block_t *block,
                               uint32_t fl,
