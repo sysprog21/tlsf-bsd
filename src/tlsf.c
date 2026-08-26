@@ -1092,6 +1092,58 @@ INLINE tlsf_block_t *block_ltrim_free(tlsf_t *t,
     return rest;
 }
 
+/* Would merging with a free predecessor make room for 'size'? A backward merge
+ * absorbs a free successor as well, so its bytes count too.
+ */
+INLINE bool block_can_expand_prev(tlsf_block_t *block, size_t size)
+{
+    if (!block_is_prev_free(block))
+        return false;
+
+    size_t room =
+        block_size(block_prev(block)) + block_size(block) + BLOCK_OVERHEAD;
+    tlsf_block_t *next = block_next(block);
+    if (block_is_free(next))
+        room += block_size(next) + BLOCK_OVERHEAD;
+    return size <= room;
+}
+
+/* Absorb 'block' into its free predecessor and slide the payload down, then
+ * absorb a free successor as well.
+ *
+ * Returns the merged block, which is used rather than free: the caller is
+ * growing a live allocation into it.
+ *
+ * The order is forced from both sides. Unlinking has to precede the move,
+ * because prev's free-list pointers sit at the front of the payload the move
+ * overwrites. The move has to precede the absorb, because absorbing writes the
+ * successor's prev field, which overlays the last word of block's payload.
+ *
+ * That is why this goes through block_absorb_at() rather than block_absorb():
+ * the move can bury block's own header under the relocated payload, so the
+ * successor has to be resolved up front and passed in rather than re-derived.
+ */
+INLINE tlsf_block_t *block_expand_prev(tlsf_t *t, tlsf_block_t *block)
+{
+    size_t avail = block_size(block);
+    tlsf_block_t *prev = block_prev(block);
+    tlsf_block_t *next = block_next(block);
+
+    block_remove(t, prev);
+    ASAN_UNPOISON(block_payload(prev), block_size(prev));
+    memmove(block_payload(prev), block_payload(block), avail);
+
+    prev = block_absorb_at(prev, next, avail + BLOCK_OVERHEAD);
+    prev = block_merge_next(t, prev);
+
+    /* prev carried the free bit in from the free list; clearing it here also
+     * updates the successor, so no separate block_set_prev_free() is needed.
+     */
+    block_set_free(prev, false);
+    ASAN_UNPOISON(block_payload(prev), block_size(prev));
+    return prev;
+}
+
 INLINE void *block_use(tlsf_t *t, tlsf_block_t *block, size_t size)
 {
     /* Unpoison before trimming -- block_split writes into the payload. */
@@ -1507,6 +1559,23 @@ size_t tlsf_usable_size(void *ptr)
     return block_size(block);
 }
 
+/* Move an allocation to a fresh block. On failure the original is untouched,
+ * which is what lets tlsf_realloc() return NULL without losing the payload.
+ *
+ * Not a block_* helper despite the shape: it calls tlsf_malloc()/tlsf_free(),
+ * so unlike everything in that family it depends on the layer above it and can
+ * never join the Frama-C leaf list.
+ */
+static void *realloc_relocate(tlsf_t *t, void *mem, size_t size)
+{
+    void *dst = tlsf_malloc(t, size);
+    if (!dst)
+        return NULL;
+    memcpy(dst, mem, block_size(block_from_payload(mem)));
+    tlsf_free(t, mem);
+    return dst;
+}
+
 void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
 {
     /* Zero-size requests are treated as free. */
@@ -1530,72 +1599,20 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
     /* Do we need to expand? */
     if (size > avail) {
         tlsf_block_t *next = block_next(block);
-        bool next_free = block_is_free(next);
-        size_t next_size = next_free ? block_size(next) + BLOCK_OVERHEAD : 0;
 
-        /* Try forward expansion first (no data movement required). */
-        if (next_free && size <= avail + next_size) {
+        /* Three ways to grow, in order of cost: forward costs nothing, backward
+         * costs a memmove, relocation costs a copy plus a new block.
+         */
+        if (block_is_free(next) &&
+            size <= avail + block_size(next) + BLOCK_OVERHEAD) {
             block_merge_next(t, block);
             ASAN_UNPOISON(block_payload(block), block_size(block));
             block_set_prev_free(block_next(block), false);
-        }
-        /* Try backward expansion (requires memmove). */
-        else if (block_is_prev_free(block)) {
-            tlsf_block_t *prev = block_prev(block);
-            size_t prev_size = block_size(prev);
-            size_t combined = prev_size + avail + BLOCK_OVERHEAD;
-
-            /* Can also merge with next if it's free. */
-            if (next_free)
-                combined += next_size;
-
-            if (size <= combined) {
-                /* Remove prev from free list. */
-                block_remove(t, prev);
-
-                ASAN_UNPOISON(block_payload(prev), prev_size);
-
-                /* Move data to prev's payload area (regions may overlap). */
-                memmove(block_payload(prev), mem, avail);
-
-                /* Merge prev + current: update size, preserve prev's prev_free
-                 * bit. Result is a used block (not free).
-                 */
-                size_t new_size = prev_size + avail + BLOCK_OVERHEAD;
-                prev->header = new_size | (prev->header & BLOCK_BIT_PREV_FREE);
-                block_link_next(prev);
-
-                /* Also merge next if it's free. */
-                if (next_free) {
-                    block_remove(t, next);
-                    ASAN_UNPOISON(block_payload(next), block_size(next));
-                    prev->header += block_size(next) + BLOCK_OVERHEAD;
-                    block_link_next(prev);
-                }
-
-                /* Update next block's prev_free status (we're now used). */
-                block_set_prev_free(block_next(prev), false);
-
-                /* Switch to the merged block. */
-                block = prev;
-                mem = block_payload(block);
-            } else {
-                /* Combined space still insufficient, must relocate. */
-                void *dst = tlsf_malloc(t, size);
-                if (dst) {
-                    memcpy(dst, mem, avail);
-                    tlsf_free(t, mem);
-                }
-                return dst;
-            }
+        } else if (block_can_expand_prev(block, size)) {
+            block = block_expand_prev(t, block);
+            mem = block_payload(block);
         } else {
-            /* No in-place expansion possible, must relocate. */
-            void *dst = tlsf_malloc(t, size);
-            if (dst) {
-                memcpy(dst, mem, avail);
-                tlsf_free(t, mem);
-            }
-            return dst;
+            return realloc_relocate(t, mem, size);
         }
     }
 
