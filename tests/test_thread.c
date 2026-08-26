@@ -8,6 +8,11 @@
  *   - No double-free or use-after-free (ASan / TLSF_ENABLE_CHECK)
  *   - Arena distribution (multiple arenas actually used)
  *   - Aggregate statistics consistency after all threads join
+ *
+ * It also carries weak_resize_test(), which belongs to the core allocator
+ * rather than the wrapper. build/wcet links the weak tlsf_resize() too, but
+ * drives static pools only, so arena_grow() returns before ever calling it.
+ * This is the one binary that both links the weak default and reaches it.
  */
 
 /* Assertions are this program's pass/fail signal; see tests/test.c. */
@@ -384,6 +389,213 @@ static void basic_test(void)
     printf("done\n");
 }
 
+/* Did any of 'ptrs' come out of this arena? Mirrors the range test in
+ * arena_find(), which is file-static in src/tlsf_thread.c and so unreachable
+ * from here.
+ */
+static bool arena_holds_any(const tlsf_arena_t *a, void **ptrs, size_t count)
+{
+    uintptr_t base = (uintptr_t) a->base;
+    for (size_t i = 0; i < count; i++) {
+        uintptr_t addr = (uintptr_t) ptrs[i];
+        if (addr >= base && addr - base < a->capacity)
+            return true;
+    }
+    return false;
+}
+
+/* Test: cross-arena fallback when the preferred arena runs dry.
+ *
+ * arena_select() hashes the thread id, so one thread keeps landing on the same
+ * preferred arena. Draining it pushes every later request through
+ * arena_fallback_alloc(), and running all the way to exhaustion drives that
+ * function's second, blocking pass too, since a request that no arena can serve
+ * visits every lock twice before giving up. Nothing else in this file reaches
+ * either pass: the stress test sizes its arenas so the preferred one never
+ * empties.
+ */
+static void fallback_test(void)
+{
+    printf("Thread cross-arena fallback test: ");
+    fflush(stdout);
+
+    size_t usable = tlsf_thread_init(&ts, pool, sizeof(pool));
+    assert(usable > 0);
+
+    if (ts.count < 2) {
+        tlsf_thread_destroy(&ts);
+        printf("skipped (single arena)\n");
+        return;
+    }
+
+    /* About four blocks per arena, which bounds the pointer table below. */
+    size_t chunk = usable / (4 * (size_t) ts.count);
+    assert(chunk > TLSF_TEST_BLOCK_COST);
+
+    void *ptrs[4 * TLSF_ARENA_COUNT + 8];
+    size_t count = 0;
+    void *p;
+    while ((p = tlsf_thread_malloc(&ts, chunk)) != NULL) {
+        assert(count < sizeof(ptrs) / sizeof(ptrs[0]));
+        ptrs[count++] = p;
+    }
+    assert(count > 0); /* the loop ended when no arena could serve chunk */
+
+    /* Every arena contributed, which only the fallback path can arrange: a
+     * single thread asks the same preferred arena every time.
+     */
+    int served = 0;
+    for (int i = 0; i < ts.count; i++)
+        served += arena_holds_any(&ts.arenas[i], ptrs, count);
+    assert(served == ts.count);
+
+    /* With nothing left anywhere, a growing realloc cannot expand in place and
+     * cannot relocate either. It must fail without touching the original.
+     */
+    memset(ptrs[0], 0x3C, chunk);
+    assert(tlsf_thread_realloc(&ts, ptrs[0], chunk * 2) == NULL);
+    const unsigned char *kept = (const unsigned char *) ptrs[0];
+    for (size_t i = 0; i < chunk; i++)
+        assert(kept[i] == 0x3C);
+
+    for (size_t i = 0; i < count; i++)
+        tlsf_thread_free(&ts, ptrs[i]);
+    tlsf_thread_check(&ts);
+
+    tlsf_stats_t stats;
+    tlsf_thread_stats(&ts, &stats);
+    assert(stats.total_used == 0);
+
+    printf("%zu blocks across %d arenas, done\n", count, ts.count);
+    tlsf_thread_destroy(&ts);
+}
+
+/* Test: init paths the fixed 4 MB pool never reaches.
+ *
+ * A region too small to split TLSF_ARENA_COUNT ways drives the halving loop; a
+ * region too small for even one arena drives the rollback that destroys the
+ * locks created so far and leaves the instance zeroed. The remaining rollback,
+ * the one for a failed lock init, needs TLSF_LOCK_INIT() to fail and has no
+ * portable trigger.
+ */
+static void init_limits_test(void)
+{
+    printf("Thread init limits test: ");
+    fflush(stdout);
+
+    static tlsf_thread_t small;
+
+    /* One word short of what tlsf_pool_init() accepts, so the first arena fails
+     * and init unwinds.
+     */
+    TLSF_MSVC_ALIGN(16)
+    static char cramped[TLSF_TEST_BLOCK_COST] TLSF_GCC_ALIGN(16);
+    assert(tlsf_thread_init(&small, cramped, sizeof(cramped)) == 0);
+    assert(small.count == 0);
+
+    /* A failed instance is inert rather than dangerous. */
+    assert(tlsf_thread_malloc(&small, 16) == NULL);
+    tlsf_thread_free(&small, NULL);
+    tlsf_thread_check(&small);
+    tlsf_thread_destroy(&small);
+
+    /* Too small to divide TLSF_ARENA_COUNT ways: the count halves until each
+     * share clears the per-arena minimum. Two arenas' worth of the 256-byte
+     * per-arena minimum that tlsf_thread_init() enforces, so the count has to
+     * halve at least once.
+     */
+    TLSF_MSVC_ALIGN(16) static char narrow[2 * 256] TLSF_GCC_ALIGN(16);
+    size_t usable = tlsf_thread_init(&small, narrow, sizeof(narrow));
+    assert(usable > 0);
+    assert(small.count >= 1);
+#if TLSF_ARENA_COUNT > 2
+    assert(small.count < TLSF_ARENA_COUNT);
+#endif
+
+    void *p = tlsf_thread_malloc(&small, 32);
+    assert(p);
+    tlsf_thread_free(&small, p);
+    tlsf_thread_check(&small);
+
+    printf("%zu bytes seated %d of %d arenas, done\n", sizeof(narrow),
+           small.count, TLSF_ARENA_COUNT);
+    tlsf_thread_destroy(&small);
+}
+
+/* Test: the weak tlsf_resize() default.
+ *
+ * This binary supplies no strong definition, so a dynamic arena has no backend
+ * to grow from and every allocation must fail rather than hand out memory that
+ * was never mapped. tests/test.c and tests/bench.c cannot check this; both
+ * define their own tlsf_resize(). tests/wcet.c links the weak one but never
+ * reaches it, since it allocates only from static pools.
+ */
+static void weak_resize_test(void)
+{
+    printf("Weak tlsf_resize default test: ");
+    fflush(stdout);
+
+    /* Zeroed, so not a fixed pool: growth goes through tlsf_resize(). */
+    static tlsf_t dynamic;
+
+    assert(tlsf_malloc(&dynamic, 64) == NULL);
+    assert(tlsf_aalloc(&dynamic, 256, 64) == NULL);
+
+    tlsf_stats_t stats;
+    assert(tlsf_get_stats(&dynamic, &stats) == 0);
+    assert(stats.total_used == 0);
+    assert(stats.block_count == 0);
+
+    printf("done\n");
+}
+
+/* Test: null and foreign arguments across the wrapper API.
+ *
+ * Same gap as argument_contract_test() in tests/test.c, one layer up: every one
+ * of these is a pure rejection path that the functional tests never enter. The
+ * foreign-pointer cases matter most, since arena_find() failing to place a
+ * pointer is the wrapper's only defense against operating on memory it does not
+ * own.
+ */
+static void null_argument_test(void)
+{
+    printf("Thread null argument test: ");
+    fflush(stdout);
+
+    assert(tlsf_thread_init(&ts, pool, sizeof(pool)) > 0);
+
+    assert(tlsf_thread_init(NULL, pool, sizeof(pool)) == 0);
+    assert(tlsf_thread_init(&ts, NULL, sizeof(pool)) == 0);
+    assert(tlsf_thread_init(&ts, pool, 0) == 0);
+
+    assert(tlsf_thread_malloc(NULL, 16) == NULL);
+    assert(tlsf_thread_aalloc(&ts, 0, 16) == NULL);
+    assert(tlsf_thread_realloc(NULL, NULL, 16) == NULL);
+
+    tlsf_thread_free(NULL, NULL);
+    tlsf_thread_check(NULL);
+    tlsf_thread_reset(NULL);
+    tlsf_thread_destroy(NULL);
+
+    tlsf_stats_t stats;
+    assert(tlsf_thread_stats(NULL, &stats) == -1);
+    assert(tlsf_thread_stats(&ts, NULL) == -1);
+
+    /* A pointer no arena owns is refused rather than acted on. */
+    char foreign[64];
+    tlsf_thread_free(&ts, foreign);
+    assert(tlsf_thread_realloc(&ts, foreign, 32) == NULL);
+
+    /* The instance is unharmed by all of it. */
+    tlsf_thread_check(&ts);
+    void *p = tlsf_thread_malloc(&ts, 64);
+    assert(p);
+    tlsf_thread_free(&ts, p);
+
+    tlsf_thread_destroy(&ts);
+    printf("done\n");
+}
+
 /* Main */
 
 int main(void)
@@ -395,6 +607,10 @@ int main(void)
     stress_test();
     aligned_test();
     reset_test();
+    fallback_test();
+    init_limits_test();
+    weak_resize_test();
+    null_argument_test();
 
     puts("OK!");
     return 0;
