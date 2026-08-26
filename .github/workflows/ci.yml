@@ -102,12 +102,14 @@ jobs:
         run: make all
         env:
           CC: ${{ matrix.cc }}
-          CFLAGS: ${{ matrix.cflags }}
+          CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
+          CPPFLAGS: ${{ matrix.cflags }}
       - name: Test
         run: make check
         env:
           CC: ${{ matrix.cc }}
-          CFLAGS: ${{ matrix.cflags }}
+          CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
+          CPPFLAGS: ${{ matrix.cflags }}
   
   # 32-bit build: exercises the _TLSF_SIZE_WIDTH == 32 paths (ALIGN_SHIFT 2,
   # _TLSF_FL_MAX 31, __builtin_clzl) that the 64-bit matrix never compiles.
@@ -117,17 +119,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install multilib toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
         env:
           DEBIAN_FRONTEND: noninteractive
       - name: Build
         run: make all
         env:
-          CFLAGS: "-m32"
+          CPPFLAGS: "-m32"
       - name: Test
         run: make check
         env:
-          CFLAGS: "-m32"
+          CPPFLAGS: "-m32"
 
   # Deductive verification of the annotated leaf helpers. Runs in the official
   # Frama-C image so the job does not pay for an opam build on every push.
@@ -194,7 +196,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
       - name: Build (release, no assert/check overhead)
-        run: make all CFLAGS="-Iinclude -std=gnu11 -O2 -Wall -Wextra -Wconversion"
+        run: make all TLSF_DEBUG_FLAGS= CFLAGS="-Iinclude -std=gnu11 -O2 -Wall -Wextra -Wconversion"
       - name: WCET measurement
         run: ./build/wcet -i 5000 -w 500 -r build/wcet_raw.csv | tee build/wcet_output.txt
       - name: Generate plots

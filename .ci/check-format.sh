@@ -16,15 +16,15 @@ PY_FORMAT_EXIT=0
 C_SOURCES=()
 while IFS= read -r file; do
 	[ -n "$file" ] && C_SOURCES+=("$file")
-done < <(git ls-files -- 'include/*.h' 'src/*.c' 'src/*.h' 'ports/*.c' 'ports/*.h' 'tests/*.c' 'tests/*.h')
+done < <(git ls-files -- 'include/*.h' 'src/*.c' 'src/*.h' 'ports/*.c' 'ports/*.h' 'tests/*.c' 'tests/*.h' 'tests/*.cpp')
 
 if [ ${#C_SOURCES[@]} -gt 0 ]; then
 	if command -v clang-format-20 >/dev/null 2>&1; then
-		echo "Checking C files with clang-format-20..."
+		echo "Checking C and C++ files with clang-format-20..."
 		clang-format-20 -n --Werror "${C_SOURCES[@]}"
 		C_FORMAT_EXIT=$?
 	elif command -v clang-format >/dev/null 2>&1; then
-		echo "Checking C files with clang-format..."
+		echo "Checking C and C++ files with clang-format..."
 		clang-format -n --Werror "${C_SOURCES[@]}"
 		C_FORMAT_EXIT=$?
 	else
