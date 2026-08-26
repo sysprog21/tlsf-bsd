@@ -454,7 +454,7 @@ static void fragmentation_test(tlsf_t *t)
     double small_avg = small_total / (double) small_count;
     double large_avg = large_total / (double) large_count;
 
-    printf("  SL subdivisions: %u\n", _TLSF_SL_COUNT);
+    printf("  SL subdivisions: %d\n", _TLSF_SL_COUNT);
     printf("  Small sizes (<256B) avg overhead: %.2f%%\n", small_avg);
     printf("  Large sizes (>=256B) avg overhead: %.2f%%\n", large_avg);
     printf("  Large sizes max overhead: %.2f%% (size=%zu)\n", large_max,
@@ -1167,6 +1167,67 @@ static void small_bin_trim_test(void)
            seeded, got);
 }
 
+/* Null arguments and requests past TLSF_MAX_SIZE.
+ *
+ * The null rejects and the TLSF_MAX_SIZE bound are reached by nothing else in
+ * this file. The oversize guard matters most: adjust_size() returns the request
+ * unchanged above TLSF_MAX_SIZE precisely because align_up() would wrap it to
+ * zero and slip past the bounds test at every call site.
+ */
+static void argument_contract_test(void)
+{
+    printf("Argument contract test: ");
+    fflush(stdout);
+
+    static char pool[TLSF_TEST_POOL_CLAMP(64 * 1024)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)) > 0);
+
+    /* Null arguments are rejected, each with the failure value its return type
+     * calls for. A rejected re-init must leave 't' live.
+     */
+    assert(tlsf_pool_init(NULL, pool, sizeof(pool)) == 0);
+    assert(tlsf_pool_init(&t, NULL, sizeof(pool)) == 0);
+    assert(tlsf_append_pool(NULL, pool, sizeof(pool)) == 0);
+    assert(tlsf_append_pool(&t, NULL, sizeof(pool)) == 0);
+    assert(tlsf_append_pool(&t, pool, 0) == 0);
+    assert(tlsf_usable_size(NULL) == 0);
+
+    tlsf_stats_t stats;
+    assert(tlsf_get_stats(NULL, &stats) == -1);
+    assert(tlsf_get_stats(&t, NULL) == -1);
+
+    /* Freeing null is a no-op the pool survives. */
+    tlsf_free(&t, NULL);
+    tlsf_check(&t);
+
+    /* Requests above TLSF_MAX_SIZE fail instead of wrapping through align_up().
+     * SIZE_MAX is the value that wraps to zero. Both values matter.
+     * TLSF_MAX_SIZE + 1 is the boundary, but only SIZE_MAX makes align_up()
+     * wrap to zero, so only it catches a lost early return in adjust_size().
+     */
+    assert(tlsf_malloc(&t, SIZE_MAX) == NULL);
+    assert(tlsf_malloc(&t, (size_t) TLSF_MAX_SIZE + 1) == NULL);
+    assert(tlsf_aalloc(&t, 64, SIZE_MAX) == NULL);
+
+    /* An aligned request the pool cannot serve fails without disturbing it. */
+    assert(tlsf_aalloc(&t, 4096, sizeof(pool)) == NULL);
+    tlsf_check(&t);
+
+    /* An oversize realloc leaves the original allocation intact. */
+    void *p = tlsf_malloc(&t, 128);
+    assert(p);
+    memset(p, 0x5A, 128);
+    assert(tlsf_realloc(&t, p, SIZE_MAX) == NULL);
+    const unsigned char *data = (const unsigned char *) p;
+    for (int i = 0; i < 128; i++)
+        assert(data[i] == 0x5A);
+    tlsf_free(&t, p);
+
+    tlsf_check(&t);
+    printf("done\n");
+}
+
 static void pool_ceiling_test(void)
 {
     printf("Pool ceiling test: ");
@@ -1510,6 +1571,9 @@ int main(void)
     pool_ceiling_test();
     oversized_free_block_test();
     coalesced_free_block_test(&t);
+
+    /* Run argument contract test */
+    argument_contract_test();
 
     puts("OK!");
     return 0;
