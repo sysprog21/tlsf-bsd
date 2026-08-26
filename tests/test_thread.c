@@ -10,8 +10,9 @@
  *   - Aggregate statistics consistency after all threads join
  */
 
+/* Assertions are this program's pass/fail signal; see tests/test.c. */
+#undef NDEBUG
 #include <assert.h>
-// #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #if defined(_MSC_VER)

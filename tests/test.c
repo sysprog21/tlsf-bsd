@@ -4,6 +4,13 @@
  * "LICENSE" for information on usage and redistribution of this file.
  */
 
+/* Assertions are the only pass/fail signal these test binaries have, and
+ * several checks below call into the allocator from inside the assertion
+ * itself. A build that defines NDEBUG would compile those calls out, so the
+ * test would exercise nothing and then run on state it never set up. Keep the
+ * checks armed regardless of how the build is configured.
+ */
+#undef NDEBUG
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>

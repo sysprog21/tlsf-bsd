@@ -89,6 +89,13 @@ jobs:
           - runner: ubuntu-24.04
             cc: gcc
             cflags: "-DTLSF_SPLIT_THRESHOLD=64"
+          # NDEBUG strips libc assert(). The test binaries undefine it
+          # themselves, so they keep reporting pass/fail; without that undef
+          # this row faults in the static pool test, which is the regression
+          # it exists to catch.
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: "-DNDEBUG"
           # Portable bit-scan fallbacks used by toolchains without
           # __builtin_ctz / _BitScanForward. Unreachable on these runners
           # unless forced.
