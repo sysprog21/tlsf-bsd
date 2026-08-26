@@ -1696,14 +1696,176 @@ void tlsf_pool_reset(tlsf_t *t)
         }                                                         \
     } while (0)
 
-/**
- * Comprehensive heap consistency check.
+/* Phase 1: walk every block from the pool start to the sentinel, validating the
+ * physical chain.
  *
- * Validates ALL block invariants by walking the entire heap:
- * 1. Block walk validation (all blocks from pool start to sentinel)
- * 2. Free list validation (bitmap consistency, coalescing, cycle/duplicate
- *    detection via Floyd's algorithm -- O(1) stack usage)
- * 3. Cross-validation (free list count matches block walk count)
+ * Returns the number of free blocks seen, which phase 3 reconciles against the
+ * free lists.
+ */
+static size_t check_block_chain(tlsf_t *t)
+{
+    CHECK(t->arena, "failed to get arena pointer");
+    CHECK((size_t) t->arena % ALIGN_SIZE == 0, "arena not aligned");
+
+    /* The first block sits at t->arena - BLOCK_OVERHEAD: tlsf_block_t's prev
+     * field precedes the header, and for the first block that field is outside
+     * the arena and never accessed.
+     */
+    tlsf_block_t *block = to_block((char *) t->arena - BLOCK_OVERHEAD);
+    tlsf_block_t *prev_block = NULL;
+    size_t walk_free_count = 0;
+    size_t total_size = 0;
+    bool prev_was_free = false;
+
+    while (block_size(block) != 0) {
+        size_t bsize = block_size(block);
+
+        CHECK(bsize >= BLOCK_SIZE_MIN, "block smaller than minimum size");
+        CHECK(bsize < (size_t) 1 << FL_MAX, "block exceeds mapping range");
+        CHECK(bsize % ALIGN_SIZE == 0, "block size not aligned");
+        CHECK((size_t) block % ALIGN_SIZE == 0, "block pointer not aligned");
+        CHECK((size_t) block_payload(block) % ALIGN_SIZE == 0,
+              "payload not aligned");
+
+        if (prev_block) {
+            CHECK(block_is_prev_free(block) == prev_was_free,
+                  "prev_free bit mismatch with actual previous block state");
+            if (prev_was_free)
+                CHECK(block->prev == prev_block,
+                      "prev pointer doesn't match previous block");
+        }
+
+        if (block_is_free(block)) {
+            walk_free_count++;
+
+            /* Coalescing invariant: no two consecutive free blocks. Free-list
+             * membership is verified by the phase 2/3 count match.
+             */
+            CHECK(!prev_was_free,
+                  "consecutive free blocks (coalescing failed)");
+        }
+        prev_was_free = block_is_free(block);
+
+        total_size += bsize + BLOCK_OVERHEAD;
+        prev_block = block;
+        block = block_next(block);
+    }
+
+    /* The loop above exits only at a zero-size block, so the sentinel's size
+     * needs no separate check; what it carries in its flags does.
+     */
+    CHECK(!block_is_free(block), "sentinel marked as free");
+    CHECK(block_is_prev_free(block) == prev_was_free,
+          "sentinel prev_free bit mismatch");
+    if (prev_was_free)
+        CHECK(block->prev == prev_block, "sentinel prev pointer incorrect");
+
+    total_size += BLOCK_OVERHEAD;
+    CHECK(total_size == t->size, "block sizes don't sum to pool size");
+
+    return walk_free_count;
+}
+
+/* Walk one non-empty bin's free list, validating every block in it and the
+ * links between them.
+ *
+ * Floyd's cycle detection runs alongside: a fast pointer advances two steps per
+ * iteration, so a duplicate block that closes the list into a cycle makes slow
+ * and fast collide within O(n) steps. This replaces a former 16 KB hash-table
+ * approach with O(1) stack usage, which matters on embedded and RTOS targets.
+ *
+ * Cross-bin duplicates need no separate pass: every block is checked to map to
+ * the bin holding it, so one cannot sit in two bins without failing that check.
+ */
+static size_t check_bin_list(tlsf_t *t, uint32_t fl_idx, uint32_t sl_idx)
+{
+    tlsf_block_t *list_block = t->block[fl_idx][sl_idx];
+    const tlsf_block_t *list_prev = &t->block_null;
+    const tlsf_block_t *fast = list_block;
+    size_t count = 0;
+
+    while (list_block != &t->block_null) {
+        count++;
+
+        CHECK(block_is_free(list_block), "block in free list not free");
+
+        uint32_t fl, sl;
+        mapping(block_size(list_block), &fl, &sl);
+        CHECK(fl == fl_idx && sl == sl_idx, "block in wrong FL/SL bin");
+
+        CHECK(block_size(list_block) >= BLOCK_SIZE_MIN,
+              "free block below minimum size");
+
+        /* Coalescing: neither physical neighbor may be free. */
+        CHECK(!block_is_prev_free(list_block),
+              "free block has free predecessor (coalescing violated)");
+        tlsf_block_t *next_phys = block_next(list_block);
+        CHECK(!block_is_free(next_phys),
+              "free block has free successor (coalescing violated)");
+        CHECK(block_is_prev_free(next_phys),
+              "next block doesn't know this block is free");
+
+        CHECK(list_block->prev_free == list_prev,
+              "free list prev pointer incorrect");
+        if (list_prev != &t->block_null)
+            CHECK(list_prev->next_free == list_block,
+                  "free list next pointer incorrect");
+
+        list_prev = list_block;
+        list_block = list_block->next_free;
+
+        if (fast != &t->block_null)
+            fast = fast->next_free;
+        if (fast != &t->block_null)
+            fast = fast->next_free;
+        CHECK(list_block == &t->block_null || list_block != fast,
+              "cycle in free list (duplicate block / double-free?)");
+    }
+
+    return count;
+}
+
+/* Phase 2: every bin agrees with the bitmaps, and every list it holds is
+ * internally consistent.
+ *
+ * Returns the total number of blocks on the free lists.
+ */
+static size_t check_free_lists(tlsf_t *t)
+{
+    size_t list_free_count = 0;
+
+    for (uint32_t i = 0; i < FL_COUNT; ++i) {
+        uint32_t sl_list = t->sl[i];
+
+        if (!(t->fl & (1U << i))) {
+            CHECK(sl_list == 0, "SL bitmap non-zero but FL bit is clear");
+            for (uint32_t j = 0; j < SL_COUNT; ++j)
+                CHECK(t->block[i][j] == &t->block_null,
+                      "block pointer not sentinel but FL bit is clear");
+            continue;
+        }
+
+        CHECK(sl_list != 0, "FL bit set but SL bitmap is empty");
+
+        for (uint32_t j = 0; j < SL_COUNT; ++j) {
+            if (!(sl_list & (1U << j))) {
+                CHECK(t->block[i][j] == &t->block_null,
+                      "block pointer not sentinel but SL bit is clear");
+                continue;
+            }
+
+            CHECK(t->block[i][j] != &t->block_null,
+                  "SL bit set but block list is empty (sentinel)");
+            list_free_count += check_bin_list(t, i, j);
+        }
+    }
+
+    return list_free_count;
+}
+
+/* Walk the whole arena and abort if any invariant is broken, in three phases:
+ * check_block_chain() for the physical chain, check_free_lists() for the bins,
+ * then the count reconciliation below. Each is documented at its definition.
  */
 void tlsf_check(tlsf_t *t)
 {
@@ -1713,177 +1875,9 @@ void tlsf_check(tlsf_t *t)
     if (!t->size)
         return;
 
-    /* Get arena start */
-    void *arena_start = t->arena;
-    CHECK(arena_start, "failed to get arena pointer");
-    CHECK((size_t) arena_start % ALIGN_SIZE == 0, "arena not aligned");
+    size_t walk_free_count = check_block_chain(t);
+    size_t list_free_count = check_free_lists(t);
 
-    /* Phase 1: Walk ALL blocks from pool start to sentinel This validates the
-     * physical block chain integrity
-     *
-     * The first block is at arena_start - BLOCK_OVERHEAD because the
-     * tlsf_block_t structure's prev field precedes the header, but for the
-     * first block, the prev field is outside the arena (never accessed).
-     */
-    tlsf_block_t *block = to_block((char *) arena_start - BLOCK_OVERHEAD);
-    tlsf_block_t *prev_block = NULL;
-    size_t walk_free_count = 0;
-    size_t total_size = 0;
-    bool prev_was_free = false;
-
-    while (block_size(block) != 0) {
-        size_t bsize = block_size(block);
-
-        /* Size invariants */
-        CHECK(bsize >= BLOCK_SIZE_MIN, "block smaller than minimum size");
-        CHECK(bsize < (size_t) 1 << FL_MAX, "block exceeds mapping range");
-        CHECK(bsize % ALIGN_SIZE == 0, "block size not aligned");
-
-        /* Pointer alignment check */
-        CHECK((size_t) block % ALIGN_SIZE == 0, "block pointer not aligned");
-        CHECK((size_t) block_payload(block) % ALIGN_SIZE == 0,
-              "payload not aligned");
-
-        /* Prev pointer validation */
-        if (prev_block) {
-            CHECK(block_is_prev_free(block) == prev_was_free,
-                  "prev_free bit mismatch with actual previous block state");
-            if (prev_was_free) {
-                CHECK(block->prev == prev_block,
-                      "prev pointer doesn't match previous block");
-            }
-        }
-
-        if (block_is_free(block)) {
-            walk_free_count++;
-
-            /* Coalescing invariant: no two consecutive free blocks */
-            CHECK(!prev_was_free,
-                  "consecutive free blocks (coalescing failed)");
-
-            /* Free-list membership verified by Phase 2/3 count match */
-            prev_was_free = true;
-        } else {
-            prev_was_free = false;
-        }
-
-        total_size += bsize + BLOCK_OVERHEAD;
-        prev_block = block;
-        block = block_next(block);
-    }
-
-    /* Sentinel validation */
-    CHECK(block_size(block) == 0, "sentinel has non-zero size");
-    CHECK(!block_is_free(block), "sentinel marked as free");
-    CHECK(block_is_prev_free(block) == prev_was_free,
-          "sentinel prev_free bit mismatch");
-    if (prev_was_free && prev_block) {
-        CHECK(block->prev == prev_block, "sentinel prev pointer incorrect");
-    }
-
-    /* Account for sentinel header */
-    total_size += BLOCK_OVERHEAD;
-    CHECK(total_size == t->size, "block sizes don't sum to pool size");
-
-    /* Phase 2: Walk free lists and validate bitmap consistency */
-    size_t list_free_count = 0;
-
-    for (uint32_t i = 0; i < FL_COUNT; ++i) {
-        uint32_t fl_bit = t->fl & (1U << i);
-        uint32_t sl_list = t->sl[i];
-
-        /* If FL bit is clear, all SL bits and block pointers must be the
-         * sentinel.
-         */
-        if (!fl_bit) {
-            CHECK(sl_list == 0, "SL bitmap non-zero but FL bit is clear");
-            for (uint32_t j = 0; j < SL_COUNT; ++j) {
-                CHECK(t->block[i][j] == &t->block_null,
-                      "block pointer not sentinel but FL bit is clear");
-            }
-            continue;
-        }
-
-        /* FL bit is set, so at least one SL bit must be set */
-        CHECK(sl_list != 0, "FL bit set but SL bitmap is empty");
-
-        for (uint32_t j = 0; j < SL_COUNT; ++j) {
-            uint32_t sl_bit = sl_list & (1U << j);
-            tlsf_block_t *list_block = t->block[i][j];
-
-            if (!sl_bit) {
-                CHECK(list_block == &t->block_null,
-                      "block pointer not sentinel but SL bit is clear");
-                continue;
-            }
-
-            /* SL bit is set, so block list must be non-empty */
-            CHECK(list_block != &t->block_null,
-                  "SL bit set but block list is empty (sentinel)");
-
-            /* Walk the free list for this bin. Floyd's cycle detection runs in
-             * parallel: a fast pointer advances two steps per iteration. If a
-             * duplicate block creates a cycle, slow and fast will collide in
-             * O(n) steps. This replaces the former 16 KB hash-table approach
-             * with O(1) stack usage -- critical for embedded/RTOS targets.
-             *
-             * Cross-bin duplicates are already caught above: Phase 2 validates
-             * that each block maps to its bin, so a block cannot appear in two
-             * different bins without failing the fl/sl check first.
-             */
-            const tlsf_block_t *list_prev = &t->block_null;
-            const tlsf_block_t *fast = list_block;
-            while (list_block != &t->block_null) {
-                list_free_count++;
-
-                /* Block must be free */
-                CHECK(block_is_free(list_block), "block in free list not free");
-
-                /* Block must be in correct bin */
-                uint32_t fl, sl;
-                mapping(block_size(list_block), &fl, &sl);
-                CHECK(fl == i && sl == j, "block in wrong FL/SL bin");
-
-                /* Size constraints */
-                CHECK(block_size(list_block) >= BLOCK_SIZE_MIN,
-                      "free block below minimum size");
-
-                /* Coalescing: previous physical block must not be free */
-                CHECK(!block_is_prev_free(list_block),
-                      "free block has free predecessor (coalescing violated)");
-
-                /* Coalescing: next physical block must not be free */
-                tlsf_block_t *next_phys = block_next(list_block);
-                CHECK(!block_is_free(next_phys),
-                      "free block has free successor (coalescing violated)");
-
-                /* Next block must have prev_free set */
-                CHECK(block_is_prev_free(next_phys),
-                      "next block doesn't know this block is free");
-
-                /* Free list linkage */
-                CHECK(list_block->prev_free == list_prev,
-                      "free list prev pointer incorrect");
-                if (list_prev != &t->block_null) {
-                    CHECK(list_prev->next_free == list_block,
-                          "free list next pointer incorrect");
-                }
-
-                list_prev = list_block;
-                list_block = list_block->next_free;
-
-                /* Floyd's tortoise-and-hare cycle detection */
-                if (fast != &t->block_null)
-                    fast = fast->next_free;
-                if (fast != &t->block_null)
-                    fast = fast->next_free;
-                CHECK(list_block == &t->block_null || list_block != fast,
-                      "cycle in free list (duplicate block / double-free?)");
-            }
-        }
-    }
-
-    /* Phase 3: Cross-validation */
     CHECK(walk_free_count == list_free_count,
           "free block count mismatch between block walk and free list walk");
 }
