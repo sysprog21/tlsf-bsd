@@ -59,10 +59,12 @@ $(OUT)/test: $(OBJS) tests/test.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(OUT)/bench: $(OBJS) tests/bench.c
-	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $^ $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/bench.c \
+		$(LDFLAGS) -lm
 
 $(OUT)/wcet: $(OBJS) tests/wcet.c
-	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $^ $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/wcet.c \
+		$(LDFLAGS) -lm
 
 # Thread-safe module (requires pthreads)
 $(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h
@@ -70,7 +72,8 @@ $(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h
 	$(CC) $(CFLAGS) -pthread -c -o $@ -MMD -MF $@.d $<
 
 $(OUT)/test_thread: $(OBJS) $(THREAD_OBJS) tests/test_thread.c
-	$(CC) $(CFLAGS) -pthread -o $@ -MMD -MF $@.d $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
+		$(THREAD_OBJS) tests/test_thread.c $(LDFLAGS)
 
 $(OUT)/%.o: src/%.c
 	@mkdir -p $(OUT)
