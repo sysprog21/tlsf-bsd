@@ -25,8 +25,9 @@ TARGETS = \
 TARGETS := $(addprefix $(OUT)/,$(TARGETS))
 
 THREAD_TARGETS = $(OUT)/test_thread
+CPP_TARGETS = $(OUT)/test_cpp
 
-all: $(TARGETS) $(THREAD_TARGETS)
+all: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
 
 # Full benchmark with statistical rigor (50 iterations, 5 warmup)
 bench: all
@@ -39,11 +40,34 @@ bench: all
 bench-quick: all
 	build/bench -s 64:4096 -l 100000 -i 10 -w 3
 
+# Clear this to build and test the library the way it ships. It is the only
+# way the off-branches of TLSF_ENABLE_ASSERT and TLSF_ENABLE_CHECK ever get
+# compiled: 'make check TLSF_DEBUG_FLAGS='.
+TLSF_DEBUG_FLAGS ?= -DTLSF_ENABLE_ASSERT -DTLSF_ENABLE_CHECK
+
+# Preprocessor state shared by every translation unit, C and C++ alike.
+# Configuration macros change the layout of tlsf_t, and a mismatch between two
+# objects in the same binary is not diagnosed, so they must not live in a
+# language-specific variable. Anything a caller injects through CPPFLAGS
+# reaches both compilers for the same reason.
+override CPPFLAGS += -Iinclude $(TLSF_DEBUG_FLAGS)
+
+TLSF_WARNINGS = \
+  -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual -Wconversion
+
 CFLAGS += \
-  -Iinclude \
   -std=gnu11 -g -O2 \
-  -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual -Wconversion -Wc++-compat \
-  -DTLSF_ENABLE_ASSERT -DTLSF_ENABLE_CHECK
+  $(TLSF_WARNINGS) -Wc++-compat
+
+CXXFLAGS += \
+  -std=c++11 -g -O2 \
+  $(TLSF_WARNINGS) -pedantic-errors
+
+# The header's own knobs are spelled '_TLSF_' as well as 'TLSF_', and either
+# prefix can arrive as -U rather than -D, so all four forms have to be caught.
+ifneq ($(filter -DTLSF_% -D_TLSF_% -UTLSF_% -U_TLSF_%,$(CFLAGS) $(CXXFLAGS)),)
+$(error Pass TLSF configuration macros through CPPFLAGS, not CFLAGS or CXXFLAGS)
+endif
 
 OBJS = tlsf.o
 OBJS := $(addprefix $(OUT)/,$(OBJS))
@@ -53,39 +77,44 @@ THREAD_OBJS = $(OUT)/tlsf_thread.o
 # Every rule that passes -MMD -MF must be listed, or 'clean' leaves its dep
 # file behind. $(OUT)/test is deliberately absent: its rule emits no dep file.
 deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
-	$(OUT)/bench.d $(OUT)/wcet.d $(THREAD_TARGETS:%=%.d)
+	$(OUT)/bench.d $(OUT)/wcet.d $(THREAD_TARGETS:%=%.d) $(CPP_TARGETS:%=%.d)
 
 $(OUT)/test: $(OBJS) tests/test.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(OUT)/bench: $(OBJS) tests/bench.c
-	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/bench.c \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/bench.c \
 		$(LDFLAGS) -lm
 
 $(OUT)/wcet: $(OBJS) tests/wcet.c
-	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/wcet.c \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/wcet.c \
 		$(LDFLAGS) -lm
 
 # Thread-safe module (requires pthreads)
 $(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -pthread -c -o $@ -MMD -MF $@.d $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -c -o $@ -MMD -MF $@.d $<
 
 $(OUT)/test_thread: $(OBJS) $(THREAD_OBJS) tests/test_thread.c
-	$(CC) $(CFLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
 		$(THREAD_OBJS) tests/test_thread.c $(LDFLAGS)
+
+$(OUT)/test_cpp: $(OBJS) $(THREAD_OBJS) tests/test_cpp.cpp
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
+		$(THREAD_OBJS) tests/test_cpp.cpp $(LDFLAGS)
 
 $(OUT)/%.o: src/%.c
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
 
-check: $(TARGETS) $(THREAD_TARGETS)
+check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
 	MALLOC_CHECK_=3 ./build/test
 	MALLOC_CHECK_=3 ./build/bench -l 10000 -i 3 -w 1
 	MALLOC_CHECK_=3 ./build/bench -s 32 -l 10000 -i 3 -w 1
 	MALLOC_CHECK_=3 ./build/bench -s 10:12345 -l 10000 -i 3 -w 1
 	./build/wcet -i 100 -w 10
 	./build/test_thread
+	./build/test_cpp
 
 # RTE guards are emitted as ACSL asserts, so filtering out @assert would discard
 # every runtime-error obligation that -wp-rte just generated. Keep them counted.
@@ -127,7 +156,8 @@ wcet-plot: all
 	python3 scripts/wcet_plot.py $(OUT)/wcet_raw.csv -o $(OUT)/wcet
 
 clean:
-	$(RM) $(TARGETS) $(THREAD_TARGETS) $(OBJS) $(THREAD_OBJS) $(deps)
+	$(RM) $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
+	$(RM) $(OBJS) $(THREAD_OBJS) $(deps)
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
 	$(RM) -r $(OUT)/*.dSYM

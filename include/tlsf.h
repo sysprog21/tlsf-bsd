@@ -111,35 +111,55 @@ extern "C" {
 /* An allocator with no arena yet. The first tlsf_malloc() grows one through
  * tlsf_resize(), so an instance initialized this way needs that callback.
  */
-#define TLSF_INIT ((tlsf_t) {.size = 0})
-
-/* The same value for objects with static storage duration. MSVC rejects a
- * compound literal as a static initializer, so it gets the bare brace form.
+#if defined(__cplusplus)
+/* A compound literal is not C++ at all. Value initialization zeroes every
+ * member instead, and because tlsf_t is an aggregate with no user-provided
+ * constructor it is a constant expression, so this also serves objects with
+ * static storage duration.
  */
-#if defined(_MSC_VER)
+#define TLSF_INIT tlsf_t()
+#else
+#define TLSF_INIT ((tlsf_t) {.size = 0})
+#endif
+
+/* The same value for objects with static storage duration. Only MSVC's C mode
+ * needs a different spelling, because it rejects a compound literal as a static
+ * initializer; everywhere else, including C++, the two macros cannot drift.
+ */
+#if defined(_MSC_VER) && !defined(__cplusplus)
 #define TLSF_INIT_STATIC {.size = 0}
 #else
-#define TLSF_INIT_STATIC ((tlsf_t) {.size = 0})
+#define TLSF_INIT_STATIC TLSF_INIT
 #endif
 
 #ifndef TLSF_STATIC_ASSERT
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#if defined(__cplusplus) && (__cplusplus >= 201103L)
+#define TLSF_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 #define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#elif defined(__clang__)
+#elif !defined(__cplusplus) && defined(__clang__)
 #if __has_extension(c_static_assert) || __has_feature(c_static_assert)
 #define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #endif
-#elif defined(__GNUC__) &&                                        \
+#elif !defined(__cplusplus) && defined(__GNUC__) &&               \
     ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6)) && \
     !defined(__STRICT_ANSI__)
 #define TLSF_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#else
+#endif
+#endif
+
+/* Everything the ladder above did not claim lands here: pre-C11 compilers,
+ * pre-C++11 compilers, and a clang whose nested __has_extension test came out
+ * false. That last case is why the fallback cannot be an '#else' arm of the
+ * ladder; an '#elif' that a nested '#if' declines to fill would otherwise
+ * leave the macro undefined.
+ */
+#ifndef TLSF_STATIC_ASSERT
 #define TLSF_SASSERT_GLUE(a, b) a##b
 #define TLSF_SASSERT_JOIN(a, b) TLSF_SASSERT_GLUE(a, b)
 #define TLSF_STATIC_ASSERT(cond, msg)                             \
     typedef char TLSF_SASSERT_JOIN(STATIC_ASSERT_FAILED_AT_LINE_, \
                                    __LINE__)[(cond) ? 1 : -1]
-#endif
 #endif
 
 /* Block header structure.
