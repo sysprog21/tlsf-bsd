@@ -1364,7 +1364,10 @@ static void arena_shrink(tlsf_t *t, tlsf_block_t *block)
 {
     check_sentinel(block_next(block));
     size_t size = block_size(block);
-    ASSERT(t->size + BLOCK_OVERHEAD >= size, "invalid heap size before shrink");
+
+    /* Both this block's header and the trailing sentinel are inside t->size. */
+    ASSERT(t->size >= size + 2 * BLOCK_OVERHEAD,
+           "invalid heap size before shrink");
     t->size = t->size - size - BLOCK_OVERHEAD;
     if (t->size == BLOCK_OVERHEAD)
         t->size = 0;
