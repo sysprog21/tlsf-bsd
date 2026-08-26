@@ -164,28 +164,28 @@ jobs:
       # build time.
       - name: Compile TLSF Core with MSVC
         run: |
-          cl.exe /c /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c /Fo:tlsf.obj
+          cl.exe /c /Iinclude /O2 /W3 /we4146 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c /Fo:tlsf.obj
       - name: Compile Single-Threaded TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\test.c tlsf.obj /Fe:test_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /we4146 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\test.c tlsf.obj /Fe:test_tlsf.exe
       - name: Run Single-Threaded Tests
         run: |
           .\test_tlsf.exe
       - name: Compile Multi-Threaded TLSF with MSVC (C11)
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf_thread.c tests\test_thread.c tlsf.obj /Fe:test_thread.exe
+          cl.exe /Iinclude /O2 /W3 /we4146 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf_thread.c tests\test_thread.c tlsf.obj /Fe:test_thread.exe
       - name: Run Multi-Threaded Tests
         run: |
           .\test_thread.exe
       - name: Compile Benchmark TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\bench.c tlsf.obj /Fe:bench_tlsf.exe /link Psapi.lib
+          cl.exe /Iinclude /O2 /W3 /we4146 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\bench.c tlsf.obj /Fe:bench_tlsf.exe /link Psapi.lib
       - name: Run Benchmark TLSF
         run: |
           .\bench_tlsf.exe -l 10000 -i 3 -w 1
       - name: Compile WCET TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\wcet.c tlsf.obj /Fe:wcet_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /we4146 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\wcet.c tlsf.obj /Fe:wcet_tlsf.exe
       - name: Run WCET TLSF
         run: |
           .\wcet_tlsf.exe -i 100 -w 10

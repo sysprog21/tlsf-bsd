@@ -464,6 +464,10 @@ INLINE size_t align_up(size_t x, size_t align)
  * of an undersized object before the bounds check can reject it.
  *
  * Note: uintptr_t is the canonical type for pointer-to-integer round-trips.
+ * 'align' is a power of two, so subtracting from it is congruent to negating
+ * modulo 'align' and the mask below discards the difference. Writing it that
+ * way also keeps unary minus off an unsigned operand, which MSVC reports as
+ * C4146.
  */
 /*@
   requires align > 0;
@@ -474,7 +478,7 @@ INLINE size_t align_offset(const char *p, size_t align)
 {
     ASSERT(align, "alignment must be non-zero");
     ASSERT(!(align & (align - 1)), "must align to a power of two");
-    return (size_t) (-(uintptr_t) p) & (align - 1);
+    return (size_t) (align - (uintptr_t) p) & (align - 1);
 }
 
 /* Align pointer while preserving pointer provenance.
@@ -766,16 +770,11 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
     uint32_t t = log2floor(size);
 
     /* All-ones mask when size is in the linear range (< BLOCK_SIZE_SMALL),
-     * all-zeros when in the logarithmic range.
+     * all-zeros when in the logarithmic range. Subtracting from zero rather
+     * than negating keeps unary minus off an unsigned operand, which MSVC
+     * reports as C4146.
      */
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4146)
-#endif
-    uint32_t small = -(uint32_t) (t < (uint32_t) FL_SHIFT);
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
+    uint32_t small = 0u - (uint32_t) (t < (uint32_t) FL_SHIFT);
 
     /* FL: 0 for small sizes, (t - FL_SHIFT + 1) for large sizes. The wrapping
      * subtraction when t < FL_SHIFT is harmless because ~small masks it to
