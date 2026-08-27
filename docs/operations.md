@@ -319,7 +319,7 @@ in this order:
 | Condition | Backend |
 |-----------|---------|
 | `TLSF_LOCK_T` already defined by the caller | whatever the caller supplied |
-| Windows with C11 threads available, or `TLSF_C11_THREADS` with C11 threads available | C11 `mtx_t` |
+| `TLSF_C11_THREADS` with C11 threads available | C11 `mtx_t` |
 | Windows, `_WIN32_WINNT >= 0x0600` or a compiler new enough to imply it | `SRWLOCK` |
 | Windows, older | `CRITICAL_SECTION` |
 | POSIX: `__unix__`, `__APPLE__`, `__linux__` and friends | `pthread_mutex_t` |
@@ -330,11 +330,48 @@ is the bare-metal and RTOS case this section is about, must supply
 `TLSF_LOCK_T` itself; without it the arena structure has no lock member and the
 build fails at the struct definition rather than at link time.
 
-Note the first Windows row: `TLSF_C11_THREADS` is not required there. A MinGW or
-clang build with `<threads.h>` picks C11 threads on its own, and on MSVC the
-macro is required only because MSVC gates its own C11 thread support behind it.
-That is why the ABI guard keys off the backend actually selected rather than off
-the flag.
+Keeping the Windows default at the native lock is what makes C and C++
+translation units select the same backend; the ABI guard still rejects a
+backend mismatch. It encodes which of the four the header landed on, not
+whether C11 threads were asked for, so the pair no build system chooses between
+is covered too: `_WIN32_WINNT` is settable per translation unit, and an
+`SRWLOCK` build mixed with a `CRITICAL_SECTION` one puts `base` and `capacity`
+at different offsets inside every arena and hands storage prepared by
+`InitializeSRWLock` to `EnterCriticalSection`. Sizes are no guide here. The
+cache-line alignment absorbs the 32-byte difference between those two locks, so
+`sizeof(tlsf_thread_t)` comes out identical either way, and `mtx_t` and
+`pthread_mutex_t` are the same size on glibc to begin with.
+
+Windows builds that used to reach `mtx_t` without asking now get the native lock
+instead. That is every C build with a usable `<threads.h>`, MinGW and clang but
+also MSVC under `/std:c11`: MSVC never defines `__STDC_NO_THREADS__`, so the old
+test could not tell a compiler that has C11 threads from one that does not.
+Rebuilding everything is enough, and a partial rebuild fails to link rather than
+silently disagreeing about the layout of `tlsf_thread_t`.
+
+`TLSF_C11_THREADS` brings `mtx_t` back, in C++ as much as in C. Nothing forbids
+a C++ unit from using the C11 header; the two languages simply establish that it
+is there by different means. C reads `__STDC_VERSION__`, which C++ does not
+define, so the C++ arm probes with `__has_include` instead. GCC and clang offer
+that probe in every mode, not only C++17. Where it is missing, which in practice
+means an older MSVC C++ mode, the arm falls back to the same 17.8 version test
+the C side uses, so the two languages still agree.
+
+`__STDC_NO_THREADS__` is checked once, before that split, and a compiler that
+defines it gets taken at its word in either language. The name is misleading:
+clang defines it in C++ mode, and defines it for its MSVC targets in both
+languages, so clang-cl declines the C11 backend even where the toolset ships
+`<threads.h>`. Consistency is worth more here than reach, since the alternative
+is clang-cl selecting `mtx_t` from C and `SRWLOCK` from C++ off one flag.
+
+One combination still splits them, a C library that sets `__STDC_NO_THREADS__`
+while shipping the header anyway, read by a compiler that offers no such macro
+to C++. C declines, C++ accepts. The ABI suffix makes that a link error as soon
+as the C++ side calls a wrapper function, which is the useful half of the
+answer. It is not a complete net: a C++ unit that only embeds `tlsf_thread_t` in
+a structure, or takes its size, and leaves every call to C emits nothing for the
+linker to catch, and the two layouts disagree in silence. On such a toolchain,
+mixing the two languages means leaving the flag off.
 
 Porting to an RTOS means defining `TLSF_LOCK_T`, the five lock macros, and
 `TLSF_THREAD_HINT()` before including the header. The header's own example is

@@ -9,14 +9,17 @@
 
 #pragma once
 
-/* Inhibit C++ name-mangling for tlsf functions */
-#ifdef __cplusplus
-extern "C" {
-#endif /* __cplusplus */
-
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+/* Inhibit C++ name-mangling for tlsf functions. Opened after the includes, for
+ * the reason tlsf_thread.h gives at its own block: a system header compiled
+ * inside a language linkage it never declared is not the library's to promise.
+ */
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
 
 /* IMPORTANT: the configuration macros below (TLSF_MAX_POOL_BITS in particular)
  * change the layout and size of tlsf_t, which callers allocate themselves.
@@ -118,16 +121,24 @@ extern "C" {
  * preprocessor would otherwise accept, and it is the one place this guard asks
  * something of callers.
  *
+ * The paste is one flat '##' chain: _TLSF_ABI_EVAL expands the value macros,
+ * _TLSF_ABI_PASTE glues them, and an argument next to '##' is not expanded, so
+ * the levels cannot collapse. Never nest one paste inside another. MSVC's
+ * traditional and '/Zc:preprocessor' rescans spell that differently, and
+ * '/std:c11' turns the latter on while the C++ modes leave it opt-in, so a
+ * mixed C and C++ build gets one name in two spellings and a link that fails on
+ * a configuration that matches.
+ *
  * Frama-C analyses one translation unit at a time, so it has no mismatch to
  * catch, and the suffixed names would invalidate the '-wp-fct' list in the
- * Makefile. Leave its view of the names alone.
+ * Makefile, which still names 'tlsf_pool_reset'. WP skips a name it cannot
+ * resolve and the proved-goals count still balances, so that failure is silent.
+ * Leave its view of the names alone.
  */
 #ifndef __FRAMAC__
-#define _TLSF_ABI_PASTE(a, b) a##b
-#define _TLSF_ABI_EVAL(a, b) _TLSF_ABI_PASTE(a, b)
-#define _TLSF_ABI(name)                                        \
-    _TLSF_ABI_EVAL(_TLSF_ABI_EVAL(name##_w, _TLSF_SIZE_WIDTH), \
-                   _TLSF_ABI_EVAL(_fl, _TLSF_FL_MAX))
+#define _TLSF_ABI_PASTE(name, wid, flm) name##_w##wid##_fl##flm
+#define _TLSF_ABI_EVAL(name, wid, flm) _TLSF_ABI_PASTE(name, wid, flm)
+#define _TLSF_ABI(name) _TLSF_ABI_EVAL(name, _TLSF_SIZE_WIDTH, _TLSF_FL_MAX)
 
 #define tlsf_resize _TLSF_ABI(tlsf_resize)
 #define tlsf_aalloc _TLSF_ABI(tlsf_aalloc)

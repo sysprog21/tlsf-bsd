@@ -181,14 +181,14 @@ tlsf_thread_destroy(&ts);
 
 `TLSF_ARENA_COUNT` is the arena count, four by default, and a ceiling rather
 than a promise: `tlsf_thread_init()` halves it while the per-arena share would
-fall below 256 bytes. The lock
-backend is chosen by the header: C11 `mtx_t` on Windows whenever `<threads.h>`
-is available and elsewhere when `TLSF_C11_THREADS` asks for it, Win32 `SRWLOCK`
-or `CRITICAL_SECTION` on Windows otherwise, `pthread_mutex_t` everywhere else.
-For a platform-specific lock (FreeRTOS semaphore, Zephyr k_mutex, bare-metal
-spinlock), define `TLSF_LOCK_T` and the five lock macros before including
-`tlsf_thread.h`; that bypasses the selection, so matching the backend across
-translation units becomes the caller's obligation.
+fall below 256 bytes. The lock backend is chosen by the header: C11 `mtx_t`
+when `TLSF_C11_THREADS` asks for it and `<threads.h>` is available, Win32
+`SRWLOCK` or `CRITICAL_SECTION` on Windows otherwise, `pthread_mutex_t`
+everywhere else; see [Lock backends](docs/operations.md#lock-backends) for the
+migration note. For a platform-specific lock (FreeRTOS semaphore, Zephyr
+k_mutex, bare-metal spinlock), define `TLSF_LOCK_T` and the five lock macros
+before including `tlsf_thread.h`; that bypasses the selection, so matching the
+backend across translation units becomes the caller's obligation.
 
 The full knob list is in
 [Thread wrapper flags](docs/configuration-and-verification.md#thread-wrapper-flags),

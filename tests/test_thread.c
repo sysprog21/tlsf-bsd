@@ -43,7 +43,7 @@
 TLSF_MSVC_ALIGN(16) static char pool[POOL_SIZE] TLSF_GCC_ALIGN(16);
 static tlsf_thread_t ts;
 
-#if defined(USE_C11_THREADS)
+#if defined(_TLSF_USE_C11_THREADS)
 #define TLSF_THREAD_T thrd_t
 #define TLSF_CREATE_THREAD(thrd, func, arg) thrd_create(thrd, func, arg)
 #define TLSF_JOIN_THREAD(thrd) thrd_join((thrd), NULL)
