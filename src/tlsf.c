@@ -180,6 +180,7 @@ TLSF_STATIC_ASSERT(sizeof(size_t) == sizeof(void *),
                    "size_t must equal pointer size");
 TLSF_STATIC_ASSERT(offsetof(tlsf_block_t, header) == BLOCK_HEADER_OFFSET,
                    "unexpected block header offset");
+
 /* SL_COUNT is cast because it is an unsigned int and BLOCK_SIZE_SMALL is a
  * size_t: without it the division widens a 32-bit shift result to 64 bits,
  * which is what MSVC reports as C4334, and CI promotes that to an error.
@@ -188,6 +189,15 @@ TLSF_STATIC_ASSERT(ALIGN_SIZE == BLOCK_SIZE_SMALL / (size_t) SL_COUNT,
                    "sizes are not properly set");
 TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN < BLOCK_SIZE_SMALL,
                    "min allocation size is wrong");
+
+/* tlsf_pool_init() subtracts 2 * BLOCK_OVERHEAD from an already aligned span
+ * and concludes the remainder is still aligned and still at or above the
+ * minimum block. Both terms have to be aligned for that to hold.
+ */
+TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN % ALIGN_SIZE == 0,
+                   "minimum block size must be a multiple of the alignment");
+TLSF_STATIC_ASSERT(BLOCK_OVERHEAD % ALIGN_SIZE == 0,
+                   "block overhead must be a multiple of the alignment");
 TLSF_STATIC_ASSERT(BLOCK_SIZE_MAX == TLSF_MAX_SIZE + BLOCK_OVERHEAD,
                    "max allocation size is wrong");
 TLSF_STATIC_ASSERT(FL_COUNT <= 32, "index too large");
@@ -1672,9 +1682,13 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (pool_bytes < 2 * BLOCK_OVERHEAD + BLOCK_SIZE_MIN)
         return 0;
 
+    /* 'pool_bytes' is ALIGN_SIZE-aligned and at least 2 * BLOCK_OVERHEAD +
+     * BLOCK_SIZE_MIN, and both of those terms are themselves aligned, so the
+     * remainder is aligned and cannot fall below the minimum. Only the upper
+     * bound is left to test.
+     */
     size_t free_size = pool_bytes - 2 * BLOCK_OVERHEAD;
-    free_size &= ~(ALIGN_SIZE - 1);
-    if (free_size < BLOCK_SIZE_MIN || free_size > BLOCK_SIZE_MAX)
+    if (free_size > BLOCK_SIZE_MAX)
         return 0;
 
     /* Clear any stale ASan shadow in the provided memory. Deferred until every
