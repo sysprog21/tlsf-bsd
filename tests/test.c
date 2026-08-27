@@ -169,6 +169,20 @@ void *tlsf_resize(tlsf_t *t, size_t req_size)
     return start_addr;
 }
 
+/* MSVC's RAND_MAX is 32767, so a bare rand() cannot name every element of an
+ * array longer than 32768. random_test() below builds up to 2 * spacelen live
+ * blocks and frees them by drawing indices, so on MSVC its free loop could
+ * never reach the tail and would spin forever. Draw 30 bits instead. One
+ * spelling for every draw in this file is easier to keep right than two.
+ */
+#if defined(_MSC_VER)
+#define TEST_RAND() ((rand() << 15) | rand())
+#define TEST_RAND_MAX 0x3fffffff
+#else
+#define TEST_RAND() rand()
+#define TEST_RAND_MAX RAND_MAX
+#endif
+
 static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 {
     const size_t maxitems = 2 * spacelen;
@@ -184,14 +198,14 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     size_t check_stride = maxitems > 256 ? (maxitems + 255) / 256 : 1;
 
     /* Allocate random sizes up to the cap threshold. Track them in an array. */
-    int64_t rest = (int64_t) spacelen * (rand() % 6 + 1);
+    int64_t rest = (int64_t) spacelen * (TEST_RAND() % 6 + 1);
     unsigned i = 0;
     while (rest > 0 && i < maxitems) {
-        size_t len = ((size_t) rand() % cap) + 1;
-        if (rand() % 2 == 0) {
+        size_t len = ((size_t) TEST_RAND() % cap) + 1;
+        if (TEST_RAND() % 2 == 0) {
             p[i] = tlsf_malloc(t, len);
         } else {
-            size_t align = 1U << (rand() % 20);
+            size_t align = 1U << (TEST_RAND() % 20);
             if (cap < align)
                 align = 0;
             p[i] = !align ? tlsf_malloc(t, len) : tlsf_aalloc(t, align, len);
@@ -201,8 +215,8 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         assert(p[i]);
         rest -= (int64_t) len;
 
-        if (rand() % 10 == 0) {
-            len = ((size_t) rand() % cap) + 1;
+        if (TEST_RAND() % 10 == 0) {
+            len = ((size_t) TEST_RAND() % cap) + 1;
             p[i] = tlsf_realloc(t, p[i], len);
             assert(p[i]);
         }
@@ -231,9 +245,14 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     /* Randomly deallocate the memory blocks until all of them are freed. The
      * free space should match the free space after initialisation.
      */
+    /* Every live index must be drawable or the loop below cannot terminate.
+     * This is what trips if TEST_RAND() is ever narrowed back to rand().
+     */
+    assert(i <= (unsigned) TEST_RAND_MAX + 1u);
+
     size_t freed = 0;
     for (unsigned n = i; n;) {
-        size_t target = (size_t) rand() % i;
+        size_t target = (size_t) TEST_RAND() % i;
         if (p[target] == NULL)
             continue;
 
@@ -254,14 +273,6 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 }
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
-
-#if defined(_MSC_VER)
-static int msvc_large_rand(void)
-{
-    /* 1 billion random number for MSVC */
-    return (rand() << 15) | rand();
-}
-#endif
 
 static void random_sizes_test(tlsf_t *t)
 {
@@ -286,11 +297,7 @@ static void random_sizes_test(tlsf_t *t)
         }
 
         while (n--)
-#if defined(_MSC_VER)
-            random_test(t, sizes[i], (size_t) msvc_large_rand() % sizes[i] + 1);
-#else
-            random_test(t, sizes[i], (size_t) rand() % sizes[i] + 1);
-#endif
+            random_test(t, sizes[i], (size_t) TEST_RAND() % sizes[i] + 1);
         printf(".");
         fflush(stdout);
     }
