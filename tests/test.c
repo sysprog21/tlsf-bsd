@@ -1295,11 +1295,11 @@ static void oversized_free_block_test(void)
            stats.largest_free, (size_t) TLSF_TEST_ALLOC_BOUND);
 }
 
-/* Issue #4: a freed block must land in the bin that a same-size request will
- * search, so free-then-reallocate at the same size reuses the same address.
- * Guards against a future change that searches with the rounded size but stores
- * the block at the unrounded one. The block under test is sandwiched between
- * live allocations so it cannot coalesce and mask the result.
+/* A freed block must land in the bin that a same-size request will search, so
+ * free-then-reallocate at the same size reuses the same address. Guards against
+ * a future change that searches with the rounded size but stores the block at
+ * the unrounded one. The block under test is sandwiched between live
+ * allocations so it cannot coalesce and mask the result.
  */
 static void reuse_same_address_test(void)
 {
