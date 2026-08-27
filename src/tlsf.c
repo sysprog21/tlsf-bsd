@@ -1297,7 +1297,15 @@ static bool arena_grow(tlsf_t *t, size_t size)
     return true;
 }
 
-static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
+/* Everything an append can refuse before it touches allocator state: the
+ * argument checks, the alignment, the sentinel a fixed pool has to carve out of
+ * the region itself, adjacency, and the arena ceiling.
+ *
+ * Returns the payload bytes the append would contribute, or 0 to refuse. The
+ * caller needs that figure anyway, so splitting it out costs nothing and puts
+ * every refusal in one place a test can drive without a live arena.
+ */
+static size_t arena_append_span(const tlsf_t *t, void *mem, size_t size)
 {
     if (!t->size || !mem || size < 2 * BLOCK_OVERHEAD ||
         size >= (size_t) 1 << FL_MAX)
@@ -1320,30 +1328,39 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     if (aligned_size < 2 * BLOCK_OVERHEAD)
         return 0;
 
-    /* Get current pool information */
-    void *current_pool_start = t->arena;
-    if (!current_pool_start)
+    /* Bytes but no base is a caller-corrupted control block, and the adjacency
+     * arithmetic below would run off a null pointer.
+     */
+    if (!t->arena)
         return 0;
-
-    const char *current_pool_end = (char *) current_pool_start + t->size;
 
     /* Only support coalescing if the new memory is immediately adjacent to the
      * current pool
      */
-    if (start != current_pool_end)
+    if (start != (const char *) t->arena + t->size)
         return 0;
-
-    /* Update the pool size first to include the new memory. We need
-     * aligned_size for payload + BLOCK_OVERHEAD for new sentinel.
-     */
-    size_t old_size = t->size;
 
     /* Check before adding, so the total cannot wrap on 32-bit targets. */
     if (UNLIKELY(t->size > ((size_t) 1 << FL_MAX) - BLOCK_OVERHEAD ||
                  aligned_size >
                      ((size_t) 1 << FL_MAX) - BLOCK_OVERHEAD - t->size))
         return 0;
-    size_t new_total_size = t->size + aligned_size + BLOCK_OVERHEAD;
+
+    return aligned_size;
+}
+
+static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
+{
+    size_t aligned_size = arena_append_span(t, mem, size);
+    if (!aligned_size)
+        return 0;
+
+    /* Grow the pool by the new memory: aligned_size for payload, plus
+     * BLOCK_OVERHEAD for the new sentinel.
+     */
+    void *current_pool_start = t->arena;
+    size_t old_size = t->size;
+    size_t new_total_size = old_size + aligned_size + BLOCK_OVERHEAD;
 
     /* For dynamic pools, request the backend to extend. For fixed pools, the
      * caller provides adjacent memory directly.

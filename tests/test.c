@@ -138,9 +138,17 @@ static bool pages_commit(void *addr, size_t bytes)
 }
 #endif
 
+/* Set by append_reject_test(). A backend that declines to extend the arena is
+ * the only route to the refusal path in tlsf_append_pool(), and the mmap window
+ * below never fails on its own once it is reserved.
+ */
+static bool resize_refuse = false;
+
 void *tlsf_resize(tlsf_t *t, size_t req_size)
 {
     (void) t;
+    if (resize_refuse)
+        return NULL;
     page_init();
 
     if (!start_addr) {
@@ -395,6 +403,102 @@ static void append_pool_test(tlsf_t *t)
     tlsf_free(t, ptr1);
     tlsf_check(t);
     printf("done\n");
+}
+
+/* Every way tlsf_append_pool() refuses a region. These are the branches a
+ * randomized run never reaches: each needs a region shaped to defeat one
+ * specific test, and coverage showed the whole group unexecuted.
+ *
+ * A word is both ALIGN_SIZE and BLOCK_OVERHEAD on every supported target, so
+ * the sizes below are written in terms of sizeof(size_t) and hold on 32-bit.
+ *
+ * What each case is worth was measured by breaking the allocator and rerunning:
+ *   - the backend refusal and the arena ceiling both fail here if their guard
+ *     is removed, so those two pin behaviour;
+ *   - the null-arena case fails only under UBSan, which reports the offset
+ *     applied to a null pointer that the guard exists to prevent;
+ *   - the two fixed-pool sentinel cases reach their branch but do not pin it.
+ *     Every later check refuses the same region, so no input distinguishes
+ *     '<=' from '<' there. They are coverage, not a contract.
+ */
+static void append_reject_test(tlsf_t *dynamic)
+{
+    printf("Append rejection test: ");
+    fflush(stdout);
+
+    const size_t word = sizeof(size_t);
+    static char fixed_pool[TLSF_TEST_POOL_CLAMP(4096)];
+    static size_t scratch[8];
+    tlsf_t fixed;
+    assert(tlsf_pool_init(&fixed, fixed_pool, sizeof(fixed_pool)) > 0);
+
+    /* Misaligning by one byte costs the region a word, leaving exactly the one
+     * a fixed pool must spend on its own sentinel.
+     */
+    assert(tlsf_append_pool(&fixed, (char *) scratch + 1, 2 * word) == 0);
+
+    /* Aligned and twice a word: the sentinel leaves a single word of payload,
+     * which is below the two words any block needs.
+     */
+    assert(tlsf_append_pool(&fixed, scratch, 2 * word) == 0);
+
+    /* A control block claiming bytes with no base is caller-corrupted. The
+     * adjacency test would dereference nothing, so the guard has to come first.
+     */
+    tlsf_t headless;
+    memset(&headless, 0, sizeof(headless));
+    headless.size = 64;
+    headless.fixed = true;
+    assert(tlsf_append_pool(&headless, scratch, sizeof(scratch)) == 0);
+
+    /* A dynamic pool asks its backend for the extension, and a backend that
+     * declines must leave the allocator exactly as it was. The live block is
+     * what keeps the arena from being handed back between tests, which would
+     * make this an append to an allocator that owns nothing.
+     */
+    void *live = tlsf_malloc(dynamic, 128);
+    assert(live);
+    size_t before = dynamic->size;
+    assert(before > 0 && dynamic->arena == start_addr);
+
+    resize_refuse = true;
+    size_t refused =
+        tlsf_append_pool(dynamic, (char *) start_addr + before, 4096);
+    resize_refuse = false;
+    assert(refused == 0);
+    assert(dynamic->size == before);
+    tlsf_free(dynamic, live);
+    tlsf_check(dynamic);
+
+    /* The arena ceiling. Only reachable when the configuration puts 2^FL_MAX
+     * within reach of one host allocation, which is what the reduced
+     * TLSF_MAX_POOL_BITS builds in CI are for.
+     */
+    const size_t ceiling = (size_t) 1 << _TLSF_FL_MAX;
+    if (ceiling + 2 * word > TLSF_TEST_BACKABLE_MAX) {
+        printf("done (ceiling case skipped, needs %zu bytes)\n",
+               ceiling + 2 * word);
+        return;
+    }
+
+    size_t pool_bytes = (size_t) TLSF_MAX_POOL_BYTES;
+    size_t append_bytes = ceiling / 2;
+    char *mem = (char *) malloc(pool_bytes + append_bytes);
+    assert(mem);
+    assert((size_t) mem % word == 0); /* else pool_bytes shifts the boundary */
+
+    tlsf_t brimming;
+    assert(tlsf_pool_init(&brimming, mem, pool_bytes) > 0);
+    assert(brimming.size == pool_bytes);
+
+    /* Adjacent, aligned, and large enough to serve: the only thing wrong with
+     * it is that the total would pass what mapping() can index.
+     */
+    assert(tlsf_append_pool(&brimming, mem + pool_bytes, append_bytes) == 0);
+    tlsf_check(&brimming);
+
+    free(mem);
+    printf("done (ceiling case covered at %zu bytes)\n", ceiling);
 }
 
 /* Test internal fragmentation by allocating various sizes and measuring the
@@ -1542,6 +1646,7 @@ int main(void)
 
     /* Run pool append test */
     append_pool_test(&t);
+    append_reject_test(&t);
 
     /* Run backward expansion test */
     realloc_backward_test(&t);
