@@ -150,32 +150,42 @@ jobs:
 
   build-windows-msvc:
     runs-on: windows-latest
-    timeout-minutes: 10
+    # A healthy run finishes in well under a minute. The old ten minute limit
+    # only ever applied to a hang, where it spent nine of them confirming what
+    # the first one had already shown.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
+      # tlsf.c does not include tlsf_thread.h, so none of the flags below
+      # change how it compiles, and every executable can link the same object.
+      # Compiling it once instead of once per executable is most of this job's
+      # build time.
+      - name: Compile TLSF Core with MSVC
+        run: |
+          cl.exe /c /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c /Fo:tlsf.obj
       - name: Compile Single-Threaded TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\test.c /Fe:test_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\test.c tlsf.obj /Fe:test_tlsf.exe
       - name: Run Single-Threaded Tests
         run: |
           .\test_tlsf.exe
       - name: Compile Multi-Threaded TLSF with MSVC (C11)
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf.c src\tlsf_thread.c tests\test_thread.c /Fe:test_thread.exe
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf_thread.c tests\test_thread.c tlsf.obj /Fe:test_thread.exe
       - name: Run Multi-Threaded Tests
         run: |
           .\test_thread.exe
       - name: Compile Benchmark TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\bench.c /Fe:bench_tlsf.exe /link Psapi.lib
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\bench.c tlsf.obj /Fe:bench_tlsf.exe /link Psapi.lib
       - name: Run Benchmark TLSF
         run: |
           .\bench_tlsf.exe -l 10000 -i 3 -w 1
       - name: Compile WCET TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c tests\wcet.c /Fe:wcet_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\wcet.c tlsf.obj /Fe:wcet_tlsf.exe
       - name: Run WCET TLSF
         run: |
           .\wcet_tlsf.exe -i 100 -w 10
