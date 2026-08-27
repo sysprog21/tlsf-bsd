@@ -32,7 +32,8 @@ WP_FUNCTIONS = \
 TARGETS = \
 	test \
 	bench \
-	wcet
+	wcet \
+	fuzz
 TARGETS := $(addprefix $(OUT)/,$(TARGETS))
 
 THREAD_TARGETS = $(OUT)/test_thread
@@ -88,7 +89,8 @@ THREAD_OBJS = $(OUT)/tlsf_thread.o
 # Every rule that passes -MMD -MF must be listed, or 'clean' leaves its dep
 # file behind. $(OUT)/test is deliberately absent: its rule emits no dep file.
 deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
-	$(OUT)/bench.d $(OUT)/wcet.d $(THREAD_TARGETS:%=%.d) $(CPP_TARGETS:%=%.d)
+	$(OUT)/bench.d $(OUT)/wcet.d $(OUT)/fuzz.d \
+	$(THREAD_TARGETS:%=%.d) $(CPP_TARGETS:%=%.d)
 
 # Make compares timestamps, not command lines, so flipping a variable on the
 # command line rebuilds nothing. 'make check TLSF_DEBUG_FLAGS=' on an
@@ -130,6 +132,12 @@ $(OUT)/wcet: $(OBJS) tests/wcet.c $(FLAGS_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/wcet.c \
 		$(LDFLAGS) -lm
 
+# The replay driver, which every toolchain can build and 'make check' runs.
+# 'make fuzz' below builds the same file against libFuzzer instead.
+$(OUT)/fuzz: $(OBJS) tests/fuzz.c $(FLAGS_STAMP)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Itests -o $@ -MMD -MF $@.d $(OBJS) \
+		tests/fuzz.c $(LDFLAGS)
+
 # Thread-safe module (requires pthreads)
 $(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h $(FLAGS_STAMP)
 	@mkdir -p $(OUT)
@@ -154,6 +162,7 @@ check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
 	MALLOC_CHECK_=3 ./build/bench -s 32 -l 10000 -i 3 -w 1
 	MALLOC_CHECK_=3 ./build/bench -s 10:12345 -l 10000 -i 3 -w 1
 	./build/wcet -i 100 -w 10
+	MALLOC_CHECK_=3 ./build/fuzz
 	./build/test_thread
 	./build/test_cpp
 
@@ -182,6 +191,24 @@ verify:
 		/Proved goals:/ { found = 1; if ($$4 != $$6) bad = 1 } \
 		END { exit !found || bad }'
 
+# Coverage-guided fuzzing. Needs a clang new enough for -fsanitize=fuzzer;
+# tests/fuzz.c carries its own main() for every other toolchain, and 'make
+# check' runs that one. FUZZ_RUNS bounds a local run; CI passes a smaller
+# budget instead. FUZZ_CORPUS is where libFuzzer keeps what it learns; 'clean'
+# removes only the default under $(OUT), never a corpus the caller pointed the
+# variable at.
+FUZZ_CC ?= clang
+FUZZ_RUNS ?= 100000
+FUZZ_CORPUS ?= $(OUT)/fuzz-corpus
+FUZZ_SANITIZERS ?= fuzzer,address,undefined
+
+fuzz: $(FLAGS_STAMP)
+	@mkdir -p $(FUZZ_CORPUS)
+	$(FUZZ_CC) $(CPPFLAGS) -DTLSF_FUZZ_NO_MAIN -Itests -std=gnu11 -g -O1 \
+		-fsanitize=$(FUZZ_SANITIZERS) -o $(OUT)/fuzz-libfuzzer \
+		src/tlsf.c tests/fuzz.c $(LDFLAGS)
+	$(OUT)/fuzz-libfuzzer -runs=$(FUZZ_RUNS) $(FUZZ_CORPUS)
+
 # Full WCET measurement (10000 iterations, 1000 warmup)
 wcet: all
 	./build/wcet
@@ -201,8 +228,11 @@ clean:
 	$(RM) $(OBJS) $(THREAD_OBJS) $(deps) $(FLAGS_STAMP)
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
+	$(RM) $(OUT)/fuzz-libfuzzer
+	$(RM) -r $(OUT)/fuzz-corpus
 	$(RM) -r $(OUT)/*.dSYM
 
-.PHONY: all check clean verify bench bench-quick wcet wcet-quick wcet-plot FORCE
+.PHONY: all check clean verify bench bench-quick fuzz wcet wcet-quick \
+	wcet-plot FORCE
 
 -include $(deps)

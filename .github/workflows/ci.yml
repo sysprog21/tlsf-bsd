@@ -30,6 +30,28 @@ jobs:
       - name: Check configuration ABI guard
         run: bash .ci/check-abi-guard.sh
 
+  # Coverage-guided fuzzing over the same target 'make check' replays. A short
+  # budget per push: this is a smoke test that the harness still builds and
+  # that the last change did not open an obvious hole, not a fuzzing campaign.
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # -fsanitize=fuzzer needs the compiler-rt fuzzer library, which is a
+      # recommended package of clang rather than part of the base image.
+      - name: Install clang with the fuzzer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      # 200000 executions took over seven minutes of the ten this job allows,
+      # which is a timeout waiting to happen on a slower runner. A smoke test
+      # does not need the extra runs; a real campaign is a local 'make fuzz'.
+      - name: Fuzz the allocator
+        run: make fuzz FUZZ_CC=clang FUZZ_RUNS=50000
+
   build-and-test:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
