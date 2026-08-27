@@ -20,7 +20,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg
           echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y clang-format-20 shfmt black
+          sudo apt-get install -y clang-format-20 shfmt black cppcheck
         env:
           DEBIAN_FRONTEND: noninteractive
       - name: Check format
@@ -29,6 +29,76 @@ jobs:
         run: bash .ci/check-newline.sh
       - name: Check configuration ABI guard
         run: bash .ci/check-abi-guard.sh
+      # Library sources only. The tests trip style checks that say nothing
+      # about the allocator.
+      #
+      # Two findings cannot be avoided and are suppressed here rather than with
+      # analyser comments in the allocator. cppcheck cannot evaluate sizeof on
+      # a struct it has only seen declared, so it folds BLOCK_SIZE_MIN to zero
+      # and reports adjust_size() as comparing an unsigned value against zero.
+      # Pinned to its line, like the others below, so the id still fires
+      # anywhere else in the allocator.
+      # And it has no model for weak linkage, so it treats the default
+      # tlsf_resize() as the only definition and calls every success branch
+      # that depends on an override unreachable. Those three are pinned to
+      # their lines rather than to the file, so a real always-true condition
+      # elsewhere in the allocator still fails the job. A line that moves
+      # makes its suppression stop matching and the job fail, which is the
+      # loud direction to fail in.
+      #
+      # The third is the preprocessor emulation giving up on the ABI guard.
+      # Older simplecpp, including the one in the cppcheck Ubuntu 24.04 ships,
+      # reports "Invalid ## usage" on the token pastes that build the
+      # configuration-suffixed symbol names. Every real compiler in this matrix
+      # expands them, and .ci/check-abi-guard.sh proves the result links, so
+      # the finding says something about cppcheck rather than about the header.
+      #
+      # The suppressions are flags rather than a suppression file: the file
+      # format is not portable across cppcheck versions, and the one in Ubuntu
+      # 24.04 rejects the comments that made the file worth having.
+      - name: Static analysis
+        run: |
+          cppcheck --enable=warning,style,performance,portability --std=c11 \
+            -I include --suppress=missingIncludeSystem \
+            --suppress=unsignedLessThanZero:src/tlsf.c:750 \
+            --suppress=knownConditionTrueFalse:src/tlsf.c:1286 \
+            --suppress=knownConditionTrueFalse:src/tlsf.c:1387 \
+            --suppress=knownConditionTrueFalse:src/tlsf.c:1477 \
+            --suppress=preprocessorErrorDirective:include/tlsf.h \
+            --suppress=preprocessorErrorDirective:include/tlsf_thread.h \
+            --error-exitcode=1 --quiet src include
+
+  # Nothing measured how much of the allocator the suite reached until this
+  # job existed, and the first run found eight unreached lines.
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Line coverage floor
+        run: bash .ci/check-coverage.sh
+
+  # Coverage-guided fuzzing over the same target 'make check' replays. A short
+  # budget per push: this is a smoke test that the harness still builds and
+  # that the last change did not open an obvious hole, not a fuzzing campaign.
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # -fsanitize=fuzzer needs the compiler-rt fuzzer library, which is a
+      # recommended package of clang rather than part of the base image.
+      - name: Install clang with the fuzzer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      # 200000 executions took over seven minutes of the ten this job allows,
+      # which is a timeout waiting to happen on a slower runner. A smoke test
+      # does not need the extra runs; a real campaign is a local 'make fuzz'.
+      - name: Fuzz the allocator
+        run: make fuzz FUZZ_CC=clang FUZZ_RUNS=50000
 
   build-and-test:
     runs-on: ${{ matrix.runner }}

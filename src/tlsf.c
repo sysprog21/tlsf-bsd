@@ -180,6 +180,7 @@ TLSF_STATIC_ASSERT(sizeof(size_t) == sizeof(void *),
                    "size_t must equal pointer size");
 TLSF_STATIC_ASSERT(offsetof(tlsf_block_t, header) == BLOCK_HEADER_OFFSET,
                    "unexpected block header offset");
+
 /* SL_COUNT is cast because it is an unsigned int and BLOCK_SIZE_SMALL is a
  * size_t: without it the division widens a 32-bit shift result to 64 bits,
  * which is what MSVC reports as C4334, and CI promotes that to an error.
@@ -188,6 +189,15 @@ TLSF_STATIC_ASSERT(ALIGN_SIZE == BLOCK_SIZE_SMALL / (size_t) SL_COUNT,
                    "sizes are not properly set");
 TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN < BLOCK_SIZE_SMALL,
                    "min allocation size is wrong");
+
+/* tlsf_pool_init() subtracts 2 * BLOCK_OVERHEAD from an already aligned span
+ * and concludes the remainder is still aligned and still at or above the
+ * minimum block. Both terms have to be aligned for that to hold.
+ */
+TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN % ALIGN_SIZE == 0,
+                   "minimum block size must be a multiple of the alignment");
+TLSF_STATIC_ASSERT(BLOCK_OVERHEAD % ALIGN_SIZE == 0,
+                   "block overhead must be a multiple of the alignment");
 TLSF_STATIC_ASSERT(BLOCK_SIZE_MAX == TLSF_MAX_SIZE + BLOCK_OVERHEAD,
                    "max allocation size is wrong");
 TLSF_STATIC_ASSERT(FL_COUNT <= 32, "index too large");
@@ -838,8 +848,15 @@ INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
     /* Search for a block in the list associated with the given fl/sl index. */
     uint32_t sl_map = t->sl[*fl] & (~0U << *sl);
     if (!sl_map) {
-        /* No block exists. Search in the next largest first-level list. */
-        uint32_t fl_map = t->fl & ((*fl + 1 >= 32) ? 0U : (~0U << (*fl + 1)));
+        /* No block exists. Search in the next largest first-level list.
+         *
+         * Shifting twice rather than by '*fl + 1' is what keeps every shift
+         * count below the width of the type: '*fl' can be 31, and a single
+         * shift by 32 is undefined. Both steps are constant-folded into one
+         * instruction, and the form has no width literal to keep in step with
+         * the type.
+         */
+        uint32_t fl_map = t->fl & (~0U << 1 << *fl);
 
         /* No free blocks available, memory has been exhausted. */
         if (UNLIKELY(!fl_map))
@@ -1113,7 +1130,7 @@ INLINE bool block_can_expand_prev(tlsf_block_t *block, size_t size)
 
     size_t room =
         block_size(block_prev(block)) + block_size(block) + BLOCK_OVERHEAD;
-    tlsf_block_t *next = block_next(block);
+    const tlsf_block_t *next = block_next(block);
     if (block_is_free(next))
         room += block_size(next) + BLOCK_OVERHEAD;
     return size <= room;
@@ -1297,7 +1314,15 @@ static bool arena_grow(tlsf_t *t, size_t size)
     return true;
 }
 
-static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
+/* Everything an append can refuse before it touches allocator state: the
+ * argument checks, the alignment, the sentinel a fixed pool has to carve out of
+ * the region itself, adjacency, and the arena ceiling.
+ *
+ * Returns the payload bytes the append would contribute, or 0 to refuse. The
+ * caller needs that figure anyway, so splitting it out costs nothing and puts
+ * every refusal in one place a test can drive without a live arena.
+ */
+static size_t arena_append_span(const tlsf_t *t, void *mem, size_t size)
 {
     if (!t->size || !mem || size < 2 * BLOCK_OVERHEAD ||
         size >= (size_t) 1 << FL_MAX)
@@ -1320,30 +1345,39 @@ static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
     if (aligned_size < 2 * BLOCK_OVERHEAD)
         return 0;
 
-    /* Get current pool information */
-    void *current_pool_start = t->arena;
-    if (!current_pool_start)
+    /* Bytes but no base is a caller-corrupted control block, and the adjacency
+     * arithmetic below would run off a null pointer.
+     */
+    if (!t->arena)
         return 0;
-
-    const char *current_pool_end = (char *) current_pool_start + t->size;
 
     /* Only support coalescing if the new memory is immediately adjacent to the
      * current pool
      */
-    if (start != current_pool_end)
+    if (start != (const char *) t->arena + t->size)
         return 0;
-
-    /* Update the pool size first to include the new memory. We need
-     * aligned_size for payload + BLOCK_OVERHEAD for new sentinel.
-     */
-    size_t old_size = t->size;
 
     /* Check before adding, so the total cannot wrap on 32-bit targets. */
     if (UNLIKELY(t->size > ((size_t) 1 << FL_MAX) - BLOCK_OVERHEAD ||
                  aligned_size >
                      ((size_t) 1 << FL_MAX) - BLOCK_OVERHEAD - t->size))
         return 0;
-    size_t new_total_size = t->size + aligned_size + BLOCK_OVERHEAD;
+
+    return aligned_size;
+}
+
+static size_t arena_append_pool(tlsf_t *t, void *mem, size_t size)
+{
+    size_t aligned_size = arena_append_span(t, mem, size);
+    if (!aligned_size)
+        return 0;
+
+    /* Grow the pool by the new memory: aligned_size for payload, plus
+     * BLOCK_OVERHEAD for the new sentinel.
+     */
+    void *current_pool_start = t->arena;
+    size_t old_size = t->size;
+    size_t new_total_size = old_size + aligned_size + BLOCK_OVERHEAD;
 
     /* For dynamic pools, request the backend to extend. For fixed pools, the
      * caller provides adjacent memory directly.
@@ -1609,7 +1643,7 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
 
     /* Do we need to expand? */
     if (size > avail) {
-        tlsf_block_t *next = block_next(block);
+        const tlsf_block_t *next = block_next(block);
 
         /* Three ways to grow, in order of cost: forward costs nothing, backward
          * costs a memmove, relocation costs a copy plus a new block.
@@ -1655,9 +1689,13 @@ size_t tlsf_pool_init(tlsf_t *t, void *mem, size_t bytes)
     if (pool_bytes < 2 * BLOCK_OVERHEAD + BLOCK_SIZE_MIN)
         return 0;
 
+    /* 'pool_bytes' is ALIGN_SIZE-aligned and at least 2 * BLOCK_OVERHEAD +
+     * BLOCK_SIZE_MIN, and both of those terms are themselves aligned, so the
+     * remainder is aligned and cannot fall below the minimum. Only the upper
+     * bound is left to test.
+     */
     size_t free_size = pool_bytes - 2 * BLOCK_OVERHEAD;
-    free_size &= ~(ALIGN_SIZE - 1);
-    if (free_size < BLOCK_SIZE_MIN || free_size > BLOCK_SIZE_MAX)
+    if (free_size > BLOCK_SIZE_MAX)
         return 0;
 
     /* Clear any stale ASan shadow in the provided memory. Deferred until every
