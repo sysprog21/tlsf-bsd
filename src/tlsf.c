@@ -444,7 +444,11 @@ INLINE void block_set_prev_free(tlsf_block_t *block, bool free)
                     (free ? BLOCK_BIT_PREV_FREE : 0);
 }
 
-/*@ assigns \nothing; */
+/*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
+  assigns \nothing;
+*/
 INLINE size_t align_up(size_t x, size_t align)
 {
     ASSERT(align, "alignment must be non-zero");
@@ -564,6 +568,7 @@ INLINE tlsf_block_t *block_prev(const tlsf_block_t *block)
 /*@
   requires tlsf_next_header_span(block);
   requires tlsf_aligned_header(block);
+  requires block->header - block->header % ALIGN_SIZE >= BLOCK_OVERHEAD;
   assigns \result \from block, block->header;
 */
 INLINE tlsf_block_t *block_next(tlsf_block_t *block)
@@ -702,6 +707,8 @@ INLINE void block_set_free(tlsf_block_t *block, bool free)
  * bypassing subsequent TLSF_MAX_SIZE checks.
  */
 /*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
   assigns \nothing;
   ensures size > TLSF_MAX_SIZE ==> \result == size;
 */
