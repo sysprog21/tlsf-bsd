@@ -449,6 +449,12 @@ INLINE void block_set_prev_free(tlsf_block_t *block, bool free)
                     (free ? BLOCK_BIT_PREV_FREE : 0);
 }
 
+/* The two requires mirror the runtime assertions below, and match
+ * align_offset() and align_ptr() byte for byte. Keep them written out: folding
+ * the pair into a named predicate stops Alt-Ergo discharging them at the call
+ * sites. Without them WP cannot prove this function's own assertions in an
+ * assertions-enabled build.
+ */
 /*@
   requires align > 0;
   requires (align & (align - 1)) == 0;
@@ -573,7 +579,12 @@ INLINE tlsf_block_t *block_prev(const tlsf_block_t *block)
     return block->prev;
 }
 
-/* Return location of next existing block. */
+/* Return location of next existing block. The third clause restates the second
+ * conjunct of tlsf_next_header_span, and the second clause restates the first,
+ * so neither asks anything new of a caller. Both are load-bearing anyway:
+ * without them Alt-Ergo crashes on this function's runtime assertion with
+ * "unbound variable in of_term" rather than merely timing out.
+ */
 /*@
   requires tlsf_next_header_span(block);
   requires tlsf_aligned_header(block);
