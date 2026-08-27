@@ -251,10 +251,9 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     tlsf_check(t);
 
     /* Randomly deallocate the memory blocks until all of them are freed. The
-     * free space should match the free space after initialisation.
-     */
-    /* Every live index must be drawable or the loop below cannot terminate.
-     * This is what trips if TEST_RAND() is ever narrowed back to rand().
+     * free space should match the free space after initialisation. Every live
+     * index must be drawable or the loop below cannot terminate. This is what
+     * trips if TEST_RAND() is ever narrowed back to rand().
      */
     assert(i <= (unsigned) TEST_RAND_MAX + 1u);
 
