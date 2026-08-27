@@ -4,6 +4,13 @@
  * "LICENSE" for information on usage and redistribution of this file.
  */
 
+/* Assertions are the only pass/fail signal these test binaries have, and
+ * several checks below call into the allocator from inside the assertion
+ * itself. A build that defines NDEBUG would compile those calls out, so the
+ * test would exercise nothing and then run on state it never set up. Keep the
+ * checks armed regardless of how the build is configured.
+ */
+#undef NDEBUG
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -162,6 +169,20 @@ void *tlsf_resize(tlsf_t *t, size_t req_size)
     return start_addr;
 }
 
+/* MSVC's RAND_MAX is 32767, so a bare rand() cannot name every element of an
+ * array longer than 32768. random_test() below builds up to 2 * spacelen live
+ * blocks and frees them by drawing indices, so on MSVC its free loop could
+ * never reach the tail and would spin forever. Draw 30 bits instead. One
+ * spelling for every draw in this file is easier to keep right than two.
+ */
+#if defined(_MSC_VER)
+#define TEST_RAND() ((rand() << 15) | rand())
+#define TEST_RAND_MAX 0x3fffffff
+#else
+#define TEST_RAND() rand()
+#define TEST_RAND_MAX RAND_MAX
+#endif
+
 static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 {
     const size_t maxitems = 2 * spacelen;
@@ -177,14 +198,14 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     size_t check_stride = maxitems > 256 ? (maxitems + 255) / 256 : 1;
 
     /* Allocate random sizes up to the cap threshold. Track them in an array. */
-    int64_t rest = (int64_t) spacelen * (rand() % 6 + 1);
+    int64_t rest = (int64_t) spacelen * (TEST_RAND() % 6 + 1);
     unsigned i = 0;
     while (rest > 0 && i < maxitems) {
-        size_t len = ((size_t) rand() % cap) + 1;
-        if (rand() % 2 == 0) {
+        size_t len = ((size_t) TEST_RAND() % cap) + 1;
+        if (TEST_RAND() % 2 == 0) {
             p[i] = tlsf_malloc(t, len);
         } else {
-            size_t align = 1U << (rand() % 20);
+            size_t align = (size_t) 1 << (TEST_RAND() % 20);
             if (cap < align)
                 align = 0;
             p[i] = !align ? tlsf_malloc(t, len) : tlsf_aalloc(t, align, len);
@@ -194,8 +215,8 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         assert(p[i]);
         rest -= (int64_t) len;
 
-        if (rand() % 10 == 0) {
-            len = ((size_t) rand() % cap) + 1;
+        if (TEST_RAND() % 10 == 0) {
+            len = ((size_t) TEST_RAND() % cap) + 1;
             p[i] = tlsf_realloc(t, p[i], len);
             assert(p[i]);
         }
@@ -224,9 +245,14 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
     /* Randomly deallocate the memory blocks until all of them are freed. The
      * free space should match the free space after initialisation.
      */
+    /* Every live index must be drawable or the loop below cannot terminate.
+     * This is what trips if TEST_RAND() is ever narrowed back to rand().
+     */
+    assert(i <= (unsigned) TEST_RAND_MAX + 1u);
+
     size_t freed = 0;
     for (unsigned n = i; n;) {
-        size_t target = (size_t) rand() % i;
+        size_t target = (size_t) TEST_RAND() % i;
         if (p[target] == NULL)
             continue;
 
@@ -247,14 +273,6 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
 }
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
-
-#if defined(_MSC_VER)
-static int msvc_large_rand(void)
-{
-    /* 1 billion random number for MSVC */
-    return (rand() << 15) | rand();
-}
-#endif
 
 static void random_sizes_test(tlsf_t *t)
 {
@@ -279,11 +297,7 @@ static void random_sizes_test(tlsf_t *t)
         }
 
         while (n--)
-#if defined(_MSC_VER)
-            random_test(t, sizes[i], (size_t) msvc_large_rand() % sizes[i] + 1);
-#else
-            random_test(t, sizes[i], (size_t) rand() % sizes[i] + 1);
-#endif
+            random_test(t, sizes[i], (size_t) TEST_RAND() % sizes[i] + 1);
         printf(".");
         fflush(stdout);
     }
@@ -440,7 +454,7 @@ static void fragmentation_test(tlsf_t *t)
     double small_avg = small_total / (double) small_count;
     double large_avg = large_total / (double) large_count;
 
-    printf("  SL subdivisions: %u\n", _TLSF_SL_COUNT);
+    printf("  SL subdivisions: %d\n", _TLSF_SL_COUNT);
     printf("  Small sizes (<256B) avg overhead: %.2f%%\n", small_avg);
     printf("  Large sizes (>=256B) avg overhead: %.2f%%\n", large_avg);
     printf("  Large sizes max overhead: %.2f%% (size=%zu)\n", large_max,
@@ -1153,6 +1167,67 @@ static void small_bin_trim_test(void)
            seeded, got);
 }
 
+/* Null arguments and requests past TLSF_MAX_SIZE.
+ *
+ * The null rejects and the TLSF_MAX_SIZE bound are reached by nothing else in
+ * this file. The oversize guard matters most: adjust_size() returns the request
+ * unchanged above TLSF_MAX_SIZE precisely because align_up() would wrap it to
+ * zero and slip past the bounds test at every call site.
+ */
+static void argument_contract_test(void)
+{
+    printf("Argument contract test: ");
+    fflush(stdout);
+
+    static char pool[TLSF_TEST_POOL_CLAMP(64 * 1024)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)) > 0);
+
+    /* Null arguments are rejected, each with the failure value its return type
+     * calls for. A rejected re-init must leave 't' live.
+     */
+    assert(tlsf_pool_init(NULL, pool, sizeof(pool)) == 0);
+    assert(tlsf_pool_init(&t, NULL, sizeof(pool)) == 0);
+    assert(tlsf_append_pool(NULL, pool, sizeof(pool)) == 0);
+    assert(tlsf_append_pool(&t, NULL, sizeof(pool)) == 0);
+    assert(tlsf_append_pool(&t, pool, 0) == 0);
+    assert(tlsf_usable_size(NULL) == 0);
+
+    tlsf_stats_t stats;
+    assert(tlsf_get_stats(NULL, &stats) == -1);
+    assert(tlsf_get_stats(&t, NULL) == -1);
+
+    /* Freeing null is a no-op the pool survives. */
+    tlsf_free(&t, NULL);
+    tlsf_check(&t);
+
+    /* Requests above TLSF_MAX_SIZE fail instead of wrapping through align_up().
+     * SIZE_MAX is the value that wraps to zero. Both values matter.
+     * TLSF_MAX_SIZE + 1 is the boundary, but only SIZE_MAX makes align_up()
+     * wrap to zero, so only it catches a lost early return in adjust_size().
+     */
+    assert(tlsf_malloc(&t, SIZE_MAX) == NULL);
+    assert(tlsf_malloc(&t, (size_t) TLSF_MAX_SIZE + 1) == NULL);
+    assert(tlsf_aalloc(&t, 64, SIZE_MAX) == NULL);
+
+    /* An aligned request the pool cannot serve fails without disturbing it. */
+    assert(tlsf_aalloc(&t, 4096, sizeof(pool)) == NULL);
+    tlsf_check(&t);
+
+    /* An oversize realloc leaves the original allocation intact. */
+    void *p = tlsf_malloc(&t, 128);
+    assert(p);
+    memset(p, 0x5A, 128);
+    assert(tlsf_realloc(&t, p, SIZE_MAX) == NULL);
+    const unsigned char *data = (const unsigned char *) p;
+    for (int i = 0; i < 128; i++)
+        assert(data[i] == 0x5A);
+    tlsf_free(&t, p);
+
+    tlsf_check(&t);
+    printf("done\n");
+}
+
 static void pool_ceiling_test(void)
 {
     printf("Pool ceiling test: ");
@@ -1496,6 +1571,9 @@ int main(void)
     pool_ceiling_test();
     oversized_free_block_test();
     coalesced_free_block_test(&t);
+
+    /* Run argument contract test */
+    argument_contract_test();
 
     puts("OK!");
     return 0;

@@ -28,6 +28,14 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 #endif
 
+/* See tests/test.c. Here the assertions also gate the measurement: with them
+ * compiled out, a failed setup allocation leaves NULL and the loop times
+ * tlsf_free() on it, then reports that as a latency bound. Every assertion sits
+ * outside the read_tick() pair, and every one inside an iteration loop is
+ * followed by cache_thrash(), so no assertion residue reaches a measured region
+ * either.
+ */
+#undef NDEBUG
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
@@ -230,7 +238,8 @@ static void compute_latency_stats(tick_t *samples, size_t n, latency_stats_t *s)
  * including memory latency.
  */
 
-#define THRASH_SIZE (64U << 20) /* 64 MB -- exceeds typical L2 and most L3 */
+/* 64 MB: exceeds typical L2 and most L3 */
+#define THRASH_SIZE ((size_t) 64 << 20)
 
 static char *thrash_buf;
 
@@ -294,7 +303,6 @@ static void measure_malloc_worst(char *pool,
         tick_t end = read_tick();
 
         assert(p);
-        (void) p;
         samples[i] = end - start;
     }
 }
@@ -328,7 +336,6 @@ static void measure_malloc_best(char *pool,
         tlsf_free(&t, a);
         void *b = tlsf_malloc(&t, alloc_size);
         assert(b);
-        (void) b;
     }
 
     for (size_t i = 0; i < iterations; i++) {
@@ -336,7 +343,6 @@ static void measure_malloc_best(char *pool,
         void *a = tlsf_malloc(&t, alloc_size);
         void *sep = tlsf_malloc(&t, 1);
         assert(a && sep);
-        (void) sep;
         tlsf_free(&t, a);
         cache_thrash();
 
@@ -345,7 +351,6 @@ static void measure_malloc_best(char *pool,
         tick_t end = read_tick();
 
         assert(b);
-        (void) b;
         samples[i] = end - start;
     }
 }

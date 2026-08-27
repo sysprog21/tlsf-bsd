@@ -89,6 +89,16 @@ jobs:
           - runner: ubuntu-24.04
             cc: gcc
             cflags: "-DTLSF_SPLIT_THRESHOLD=64"
+          # Release configuration. NDEBUG covers libc assert(); clearing
+          # TLSF_DEBUG_FLAGS covers the library's own knobs, which are on for
+          # every other entry, so this is the only job that compiles the empty
+          # ASSERT(), the MAYBE_UNUSED machinery it needs, and the tlsf_check()
+          # stub. That is the build users ship. The test binaries undefine
+          # NDEBUG themselves, so they keep reporting pass/fail either way.
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: "-DNDEBUG"
+            make_args: "TLSF_DEBUG_FLAGS="
           # Portable bit-scan fallbacks used by toolchains without
           # __builtin_ctz / _BitScanForward. Unreachable on these runners
           # unless forced.
@@ -101,13 +111,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build
-        run: make all
+        run: make all ${{ matrix.make_args }}
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
           CPPFLAGS: ${{ matrix.cflags }}
       - name: Test
-        run: make check
+        run: make check ${{ matrix.make_args }}
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
@@ -164,28 +174,28 @@ jobs:
       # build time.
       - name: Compile TLSF Core with MSVC
         run: |
-          cl.exe /c /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c /Fo:tlsf.obj
+          cl.exe /c /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf.c /Fo:tlsf.obj
       - name: Compile Single-Threaded TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\test.c tlsf.obj /Fe:test_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\test.c tlsf.obj /Fe:test_tlsf.exe
       - name: Run Single-Threaded Tests
         run: |
           .\test_tlsf.exe
       - name: Compile Multi-Threaded TLSF with MSVC (C11)
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf_thread.c tests\test_thread.c tlsf.obj /Fe:test_thread.exe
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf_thread.c tests\test_thread.c tlsf.obj /Fe:test_thread.exe
       - name: Run Multi-Threaded Tests
         run: |
           .\test_thread.exe
       - name: Compile Benchmark TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\bench.c tlsf.obj /Fe:bench_tlsf.exe /link Psapi.lib
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\bench.c tlsf.obj /Fe:bench_tlsf.exe /link Psapi.lib
       - name: Run Benchmark TLSF
         run: |
           .\bench_tlsf.exe -l 10000 -i 3 -w 1
       - name: Compile WCET TLSF with MSVC
         run: |
-          cl.exe /Iinclude /O2 /W3 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\wcet.c tlsf.obj /Fe:wcet_tlsf.exe
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\wcet.c tlsf.obj /Fe:wcet_tlsf.exe
       - name: Run WCET TLSF
         run: |
           .\wcet_tlsf.exe -i 100 -w 10
@@ -208,7 +218,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
       - name: Build (release, no assert/check overhead)
-        run: make all TLSF_DEBUG_FLAGS= CFLAGS="-Iinclude -std=gnu11 -O2 -Wall -Wextra -Wconversion"
+        run: make all TLSF_DEBUG_FLAGS=
       - name: WCET measurement
         run: ./build/wcet -i 5000 -w 500 -r build/wcet_raw.csv | tee build/wcet_output.txt
       - name: Generate plots
