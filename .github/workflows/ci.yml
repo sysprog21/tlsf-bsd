@@ -30,6 +30,16 @@ jobs:
       - name: Check configuration ABI guard
         run: bash .ci/check-abi-guard.sh
 
+  # Nothing measured how much of the allocator the suite reached until this
+  # job existed, and the first run found eight unreached lines.
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Line coverage floor
+        run: bash .ci/check-coverage.sh
+
   # Coverage-guided fuzzing over the same target 'make check' replays. A short
   # budget per push: this is a smoke test that the harness still builds and
   # that the last change did not open an obvious hole, not a fuzzing campaign.

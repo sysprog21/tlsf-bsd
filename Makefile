@@ -230,6 +230,7 @@ clean:
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
 	$(RM) $(OUT)/fuzz-libfuzzer
 	$(RM) -r $(OUT)/fuzz-corpus
+	$(RM) $(OUT)/*.gcda $(OUT)/*.gcno *.gcov
 	$(RM) -r $(OUT)/*.dSYM
 
 .PHONY: all check clean verify bench bench-quick fuzz wcet wcet-quick \
