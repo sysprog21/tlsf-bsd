@@ -227,11 +227,29 @@ void *tlsf_resize_default(tlsf_t *t, size_t size)
     (void) size;
     return NULL;
 }
+/* The linker directive names the symbol as a string, and macros do not expand
+ * inside a string literal, so it cannot spell 'tlsf_resize' directly: the ABI
+ * guard in tlsf.h renames that to a configuration-suffixed symbol and the
+ * fallback would bind to a name nothing defines. Stringify the expansion
+ * instead, and build the pragma through __pragma so the whole directive can
+ * come from a macro. The fallback target keeps its plain name because it is
+ * defined here rather than declared in the public header.
+ */
+#define TLSF_STRINGIFY_(x) #x
+#define TLSF_STRINGIFY(x) TLSF_STRINGIFY_(x)
+#define TLSF_LINKER_COMMENT_(x) __pragma(comment(linker, x))
 #if defined(_M_IX86)
-#pragma comment(linker, "/alternatename:_tlsf_resize=_tlsf_resize_default")
+#define TLSF_RESIZE_ALTERNATENAME \
+    "/alternatename:_" TLSF_STRINGIFY(tlsf_resize) "=_tlsf_resize_default"
 #else
-#pragma comment(linker, "/alternatename:tlsf_resize=tlsf_resize_default")
+#define TLSF_RESIZE_ALTERNATENAME \
+    "/alternatename:" TLSF_STRINGIFY(tlsf_resize) "=tlsf_resize_default"
 #endif
+TLSF_LINKER_COMMENT_(TLSF_RESIZE_ALTERNATENAME)
+#undef TLSF_RESIZE_ALTERNATENAME
+#undef TLSF_LINKER_COMMENT_
+#undef TLSF_STRINGIFY
+#undef TLSF_STRINGIFY_
 #endif
 
 /*@

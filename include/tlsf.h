@@ -77,6 +77,11 @@ extern "C" {
  * TLSF_MAX_POOL_BITS=20 the largest accepted region is 524304 bytes, not 1 MB.
  * An unaligned pointer may carry up to ALIGN_SIZE-1 further bytes that are
  * skipped for alignment. TLSF_MAX_POOL_BYTES below states the limit.
+ *
+ * Give it a bare decimal literal. The ABI guard below pastes the value into the
+ * public symbol names, so a parenthesised or computed form such as (20) or (10
+ * + 10) does not form a valid identifier and fails to compile. The same applies
+ * to TLSF_ARENA_COUNT and TLSF_CACHELINE_SIZE in tlsf_thread.h.
  */
 #ifdef TLSF_MAX_POOL_BITS
 #define _TLSF_FL_MAX TLSF_MAX_POOL_BITS
@@ -96,6 +101,46 @@ extern "C" {
 #endif
 #define _TLSF_FL_COUNT (_TLSF_FL_MAX - _TLSF_FL_SHIFT + 1)
 #define TLSF_MAX_SIZE (((size_t) 1 << (_TLSF_FL_MAX - 1)) - sizeof(size_t))
+
+/* '_TLSF_SIZE_WIDTH' and every configuration macro that feeds '_TLSF_FL_MAX'
+ * change the layout of 'tlsf_t', which callers allocate themselves. A
+ * translation unit that disagrees with the library allocates the wrong size, so
+ * the first call writes past the end of the caller's object. Nothing diagnoses
+ * it: the link succeeds and the corruption surfaces later, somewhere else.
+ *
+ * Fold these values into the public symbol names so a disagreement becomes an
+ * undefined reference that names the value each side used. Source is unchanged,
+ * callers still write tlsf_malloc(); only the emitted symbol carries the
+ * suffix, which is what makes the mismatch visible to the linker.
+ *
+ * The cost is that the knobs must be bare decimal literals, since a token paste
+ * is what carries them into the name. That is narrower than the arithmetic the
+ * preprocessor would otherwise accept, and it is the one place this guard asks
+ * something of callers.
+ *
+ * Frama-C analyses one translation unit at a time, so it has no mismatch to
+ * catch, and the suffixed names would invalidate the '-wp-fct' list in the
+ * Makefile. Leave its view of the names alone.
+ */
+#ifndef __FRAMAC__
+#define _TLSF_ABI_PASTE(a, b) a##b
+#define _TLSF_ABI_EVAL(a, b) _TLSF_ABI_PASTE(a, b)
+#define _TLSF_ABI(name)                                        \
+    _TLSF_ABI_EVAL(_TLSF_ABI_EVAL(name##_w, _TLSF_SIZE_WIDTH), \
+                   _TLSF_ABI_EVAL(_fl, _TLSF_FL_MAX))
+
+#define tlsf_resize _TLSF_ABI(tlsf_resize)
+#define tlsf_aalloc _TLSF_ABI(tlsf_aalloc)
+#define tlsf_append_pool _TLSF_ABI(tlsf_append_pool)
+#define tlsf_pool_init _TLSF_ABI(tlsf_pool_init)
+#define tlsf_pool_reset _TLSF_ABI(tlsf_pool_reset)
+#define tlsf_malloc _TLSF_ABI(tlsf_malloc)
+#define tlsf_realloc _TLSF_ABI(tlsf_realloc)
+#define tlsf_free _TLSF_ABI(tlsf_free)
+#define tlsf_usable_size _TLSF_ABI(tlsf_usable_size)
+#define tlsf_check _TLSF_ABI(tlsf_check)
+#define tlsf_get_stats _TLSF_ABI(tlsf_get_stats)
+#endif
 
 /* Largest region tlsf_pool_init() accepts, for an ALIGN_SIZE-aligned pointer.
  * The pool's single initial free block cannot exceed 2^(_TLSF_FL_MAX - 1)
@@ -151,8 +196,8 @@ extern "C" {
 /* Everything the ladder above did not claim lands here: pre-C11 compilers,
  * pre-C++11 compilers, and a clang whose nested __has_extension test came out
  * false. That last case is why the fallback cannot be an '#else' arm of the
- * ladder; an '#elif' that a nested '#if' declines to fill would otherwise
- * leave the macro undefined.
+ * ladder; an '#elif' that a nested '#if' declines to fill would otherwise leave
+ * the macro undefined.
  */
 #ifndef TLSF_STATIC_ASSERT
 #define TLSF_SASSERT_GLUE(a, b) a##b
@@ -239,8 +284,9 @@ void *tlsf_resize(tlsf_t *t, size_t size);
  * @t : The TLSF allocator instance
  * @align : Alignment in bytes; must be a non-zero power of two
  * @size : Requested allocation size in bytes; need not be a multiple of @align
- * (follows POSIX posix_memalign semantics; C11 aligned_alloc required size %
- * align == 0 but C23 and common implementations dropped that constraint)
+ *         (follows POSIX posix_memalign semantics; C11 aligned_alloc required
+ *         size % align == 0 but C23 and common implementations dropped that
+ *         constraint)
  *
  * Return Pointer to at least @size bytes aligned to @align, or NULL on failure.
  * A zero @size request returns a unique minimum-sized allocation (consistent
@@ -328,7 +374,8 @@ void tlsf_pool_reset(tlsf_t *t);
  *
  * @t : The TLSF allocator instance
  * @size : Requested allocation size in bytes. A zero @size request returns a
- * unique minimum-sized allocation (POSIX-compatible behavior), not NULL.
+ *         unique minimum-sized allocation (POSIX-compatible behavior), not
+ *         NULL.
  *
  * Return Pointer to at least @size bytes, aligned to ALIGN_SIZE (8 on 64-bit, 4
  * on 32-bit), or NULL on failure.

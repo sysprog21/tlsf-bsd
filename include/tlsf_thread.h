@@ -231,6 +231,53 @@ TLSF_STATIC_ASSERT(TLSF_ARENA_COUNT >= 1, "TLSF_ARENA_COUNT must be >= 1");
 TLSF_STATIC_ASSERT((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
                    "TLSF_CACHELINE_SIZE must be a power of two");
 
+/* Which lock backend was selected, not which macro the caller passed. The
+ * layout follows 'USE_C11_THREADS', and that is set either by TLSF_C11_THREADS
+ * or on Windows whenever the compiler supports C11 threads, so keying this off
+ * TLSF_C11_THREADS would both miss a real difference and invent one where the
+ * flag changes nothing. A caller-supplied TLSF_LOCK_T skips the whole
+ * selection, leaving this zero, which is why that case stays a caller
+ * obligation.
+ */
+#if defined(USE_C11_THREADS)
+#define _TLSF_THREAD_C11_THREADS 1
+#else
+#define _TLSF_THREAD_C11_THREADS 0
+#endif
+
+/* Same hazard as the core allocator, and the same remedy: 'tlsf_thread_t' is
+ * caller-allocated and its layout moves with TLSF_ARENA_COUNT,
+ * TLSF_CACHELINE_SIZE and the embedded 'tlsf_t', so a translation unit that
+ * disagrees about any of them corrupts the caller's object on the first call.
+ * The core ABI suffix plus the thread-specific knobs, including the C11-threads
+ * configuration, turn that into a link error. See the matching block in tlsf.h.
+ *
+ * A custom TLSF_LOCK_T also moves the layout and cannot be encoded in a token,
+ * so it stays a caller obligation: define it in one place every translation
+ * unit sees, the way the lock macros already have to be.
+ *
+ * _TLSF_ABI_EVAL comes from tlsf.h, included above, under the same __FRAMAC__
+ * condition. Keep the two guards identical: relaxing one alone leaves this
+ * block referring to a macro that no longer exists.
+ */
+#ifndef __FRAMAC__
+#define _TLSF_THREAD_ABI(name)                                                \
+    _TLSF_ABI_EVAL(                                                           \
+        _TLSF_ABI_EVAL(_TLSF_ABI(name), _TLSF_ABI_EVAL(a, TLSF_ARENA_COUNT)), \
+        _TLSF_ABI_EVAL(_TLSF_ABI_EVAL(c, TLSF_CACHELINE_SIZE),                \
+                       _TLSF_ABI_EVAL(t, _TLSF_THREAD_C11_THREADS)))
+
+#define tlsf_thread_init _TLSF_THREAD_ABI(tlsf_thread_init)
+#define tlsf_thread_destroy _TLSF_THREAD_ABI(tlsf_thread_destroy)
+#define tlsf_thread_malloc _TLSF_THREAD_ABI(tlsf_thread_malloc)
+#define tlsf_thread_aalloc _TLSF_THREAD_ABI(tlsf_thread_aalloc)
+#define tlsf_thread_realloc _TLSF_THREAD_ABI(tlsf_thread_realloc)
+#define tlsf_thread_free _TLSF_THREAD_ABI(tlsf_thread_free)
+#define tlsf_thread_check _TLSF_THREAD_ABI(tlsf_thread_check)
+#define tlsf_thread_stats _TLSF_THREAD_ABI(tlsf_thread_stats)
+#define tlsf_thread_reset _TLSF_THREAD_ABI(tlsf_thread_reset)
+#endif
+
 TLSF_MSVC_ALIGN(TLSF_CACHELINE_SIZE) typedef struct {
     tlsf_t pool;
     TLSF_LOCK_T lock;

@@ -27,6 +27,8 @@ jobs:
         run: bash .ci/check-format.sh
       - name: Check trailing newlines
         run: bash .ci/check-newline.sh
+      - name: Check configuration ABI guard
+        run: bash .ci/check-abi-guard.sh
 
   build-and-test:
     runs-on: ${{ matrix.runner }}
