@@ -848,8 +848,15 @@ INLINE tlsf_block_t *block_find_suitable(tlsf_t *t, uint32_t *fl, uint32_t *sl)
     /* Search for a block in the list associated with the given fl/sl index. */
     uint32_t sl_map = t->sl[*fl] & (~0U << *sl);
     if (!sl_map) {
-        /* No block exists. Search in the next largest first-level list. */
-        uint32_t fl_map = t->fl & ((*fl + 1 >= 32) ? 0U : (~0U << (*fl + 1)));
+        /* No block exists. Search in the next largest first-level list.
+         *
+         * Shifting twice rather than by '*fl + 1' is what keeps every shift
+         * count below the width of the type: '*fl' can be 31, and a single
+         * shift by 32 is undefined. Both steps are constant-folded into one
+         * instruction, and the form has no width literal to keep in step with
+         * the type.
+         */
+        uint32_t fl_map = t->fl & (~0U << 1 << *fl);
 
         /* No free blocks available, memory has been exhausted. */
         if (UNLIKELY(!fl_map))
