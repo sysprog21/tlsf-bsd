@@ -205,7 +205,7 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         if (TEST_RAND() % 2 == 0) {
             p[i] = tlsf_malloc(t, len);
         } else {
-            size_t align = 1U << (TEST_RAND() % 20);
+            size_t align = (size_t) 1 << (TEST_RAND() % 20);
             if (cap < align)
                 align = 0;
             p[i] = !align ? tlsf_malloc(t, len) : tlsf_aalloc(t, align, len);

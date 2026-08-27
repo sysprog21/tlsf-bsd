@@ -238,7 +238,8 @@ static void compute_latency_stats(tick_t *samples, size_t n, latency_stats_t *s)
  * including memory latency.
  */
 
-#define THRASH_SIZE (64U << 20) /* 64 MB -- exceeds typical L2 and most L3 */
+/* 64 MB: exceeds typical L2 and most L3 */
+#define THRASH_SIZE ((size_t) 64 << 20)
 
 static char *thrash_buf;
 

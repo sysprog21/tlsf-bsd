@@ -180,7 +180,11 @@ TLSF_STATIC_ASSERT(sizeof(size_t) == sizeof(void *),
                    "size_t must equal pointer size");
 TLSF_STATIC_ASSERT(offsetof(tlsf_block_t, header) == BLOCK_HEADER_OFFSET,
                    "unexpected block header offset");
-TLSF_STATIC_ASSERT(ALIGN_SIZE == BLOCK_SIZE_SMALL / SL_COUNT,
+/* SL_COUNT is cast because it is an unsigned int and BLOCK_SIZE_SMALL is a
+ * size_t: without it the division widens a 32-bit shift result to 64 bits,
+ * which is what MSVC reports as C4334, and CI promotes that to an error.
+ */
+TLSF_STATIC_ASSERT(ALIGN_SIZE == BLOCK_SIZE_SMALL / (size_t) SL_COUNT,
                    "sizes are not properly set");
 TLSF_STATIC_ASSERT(BLOCK_SIZE_MIN < BLOCK_SIZE_SMALL,
                    "min allocation size is wrong");
