@@ -227,11 +227,30 @@ void *tlsf_resize_default(tlsf_t *t, size_t size)
     (void) size;
     return NULL;
 }
+
+/* The linker directive names the symbol as a string, and macros do not expand
+ * inside a string literal, so it cannot spell 'tlsf_resize' directly: the ABI
+ * guard in tlsf.h renames that to a configuration-suffixed symbol and the
+ * fallback would bind to a name nothing defines. Stringify the expansion
+ * instead, and build the pragma through __pragma so the whole directive can
+ * come from a macro. The fallback target keeps its plain name because it is
+ * defined here rather than declared in the public header.
+ */
+#define TLSF_STRINGIFY_(x) #x
+#define TLSF_STRINGIFY(x) TLSF_STRINGIFY_(x)
+#define TLSF_LINKER_COMMENT_(x) __pragma(comment(linker, x))
 #if defined(_M_IX86)
-#pragma comment(linker, "/alternatename:_tlsf_resize=_tlsf_resize_default")
+#define TLSF_RESIZE_ALTERNATENAME \
+    "/alternatename:_" TLSF_STRINGIFY(tlsf_resize) "=_tlsf_resize_default"
 #else
-#pragma comment(linker, "/alternatename:tlsf_resize=tlsf_resize_default")
+#define TLSF_RESIZE_ALTERNATENAME \
+    "/alternatename:" TLSF_STRINGIFY(tlsf_resize) "=tlsf_resize_default"
 #endif
+TLSF_LINKER_COMMENT_(TLSF_RESIZE_ALTERNATENAME)
+#undef TLSF_RESIZE_ALTERNATENAME
+#undef TLSF_LINKER_COMMENT_
+#undef TLSF_STRINGIFY
+#undef TLSF_STRINGIFY_
 #endif
 
 /*@
@@ -426,7 +445,11 @@ INLINE void block_set_prev_free(tlsf_block_t *block, bool free)
                     (free ? BLOCK_BIT_PREV_FREE : 0);
 }
 
-/*@ assigns \nothing; */
+/*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
+  assigns \nothing;
+*/
 INLINE size_t align_up(size_t x, size_t align)
 {
     ASSERT(align, "alignment must be non-zero");
@@ -546,6 +569,7 @@ INLINE tlsf_block_t *block_prev(const tlsf_block_t *block)
 /*@
   requires tlsf_next_header_span(block);
   requires tlsf_aligned_header(block);
+  requires block->header - block->header % ALIGN_SIZE >= BLOCK_OVERHEAD;
   assigns \result \from block, block->header;
 */
 INLINE tlsf_block_t *block_next(tlsf_block_t *block)
@@ -684,6 +708,8 @@ INLINE void block_set_free(tlsf_block_t *block, bool free)
  * bypassing subsequent TLSF_MAX_SIZE checks.
  */
 /*@
+  requires align > 0;
+  requires (align & (align - 1)) == 0;
   assigns \nothing;
   ensures size > TLSF_MAX_SIZE ==> \result == size;
 */
@@ -774,8 +800,8 @@ INLINE void mapping(size_t size, uint32_t *fl, uint32_t *sl)
 /* The preconditions below mirror the runtime asserts and are what discharge the
  * shift and array-index obligations on 't->sl[*fl]' and '~0U << *sl'.
  *
- * Deliberately kept out of WP_FUNCTIONS: 35 of 36 goals prove, and the last one
- * is the bitmap_ffs precondition on line 'sl_map = t->sl[*fl]'. Proving it
+ * Deliberately kept out of WP_FUNCTIONS: every goal but one proves, and the
+ * holdout is the bitmap_ffs precondition on 'sl_map = t->sl[*fl]'. Proving it
  * needs the coherence invariant "a set bit in t->fl implies a nonzero
  * t->sl[i]", which in turn needs a postcondition relating bitmap_ffs to the bit
  * it found. bitmap_ffs is __builtin_ctz here, and Alt-Ergo does not discharge
@@ -1366,8 +1392,8 @@ INLINE tlsf_block_t *block_find_free(tlsf_t *t, size_t *size)
     }
 
     /* *size stays at the rounded request. round_block_size() above already put
-     * it exactly on a bin boundary, which is what issue #4 requires: a freed
-     * block lands in the bin a same-size request will search.
+     * it exactly on a bin boundary, which is what bin-boundary reuse requires:
+     * a freed block lands in the bin a same-size request will search.
      *
      * Do NOT substitute mapping_size(fl, sl) here. block_find_suitable() may
      * return a block from a LARGER bin than the request maps to, and inflating
@@ -1687,7 +1713,7 @@ void tlsf_check(tlsf_t *t)
 
         /* Size invariants */
         CHECK(bsize >= BLOCK_SIZE_MIN, "block smaller than minimum size");
-        CHECK(bsize <= BLOCK_SIZE_MAX, "block exceeds maximum size");
+        CHECK(bsize < (size_t) 1 << FL_MAX, "block exceeds mapping range");
         CHECK(bsize % ALIGN_SIZE == 0, "block size not aligned");
 
         /* Pointer alignment check */

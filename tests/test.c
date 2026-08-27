@@ -1107,6 +1107,29 @@ static void small_bin_trim_test(void)
     tlsf_free(&t, big);
     tlsf_check(&t);
 
+    /* A minimal request can only trim this block if what is left over clears
+     * the split threshold. Configure that threshold near the top of the FL=0
+     * range and the allocator correctly refuses to split anything in it, so
+     * there is no trim to measure and the assertions below would be testing the
+     * configuration rather than the fast path. Skip loudly instead of failing:
+     * the library is behaving as configured.
+     *
+     * The bound is deliberately conservative rather than exact. Predicting the
+     * split decision needs the block size the fast path actually found, which
+     * may be larger than the seed after coalescing, so an exact bound derived
+     * from 'seeded' alone gets it wrong near the boundary. Over-skipping costs
+     * a narrow band of coverage; under-skipping turns a correct library into a
+     * failing test, which is worse.
+     */
+    if (TLSF_TEST_SPLIT_THRESHOLD > seeded - TLSF_TEST_BLOCK_COST) {
+        printf(
+            "skipped (split threshold %zu leaves no trimmable remainder "
+            "in a %zu-byte FL=0 block)\n",
+            (size_t) TLSF_TEST_SPLIT_THRESHOLD, seeded);
+        tlsf_free(&t, guard);
+        return;
+    }
+
     /* A minimal request must not swallow the seeded block. */
     void *probe = tlsf_malloc(&t, 1);
     assert(probe);
@@ -1135,7 +1158,7 @@ static void pool_ceiling_test(void)
     printf("Pool ceiling test: ");
     fflush(stdout);
 
-    if (TLSF_MAX_POOL_BYTES > (size_t) 64 << 20) {
+    if (TLSF_MAX_POOL_BYTES > TLSF_TEST_BACKABLE_MAX) {
         printf(
             "skipped (ceiling %zu bytes exceeds what we can allocate; "
             "build with -DTLSF_MAX_POOL_BITS=24 or less to cover it)\n",
@@ -1162,11 +1185,121 @@ static void pool_ceiling_test(void)
            align);
 }
 
-/* Issue #4: a freed block must land in the bin that a same-size request will
- * search, so free-then-reallocate at the same size reuses the same address.
- * Guards against a future change that searches with the rounded size but stores
- * the block at the unrounded one. The block under test is sandwiched between
- * live allocations so it cannot coalesce and mask the result.
+/* A coalesced free block may exceed BLOCK_SIZE_MAX, which bounds a single
+ * allocation. The structural cap is the arena ceiling of 2^_TLSF_FL_MAX, what
+ * the mapping function can index, so a heap check that reused the allocation
+ * bound aborted on a perfectly healthy heap.
+ *
+ * This is the route that needs no fixed pool and no append, only coalescing.
+ * Two large neighbours freed back to back merge into one block above the
+ * allocation bound. A third live allocation past them keeps the merge away from
+ * the sentinel, which would otherwise route the run to arena_shrink() and hide
+ * it. Shares the caller's dynamic arena because tlsf_resize() here hands every
+ * instance the same region.
+ */
+static void coalesced_free_block_test(tlsf_t *t)
+{
+    printf("Coalesced free block test: ");
+    fflush(stdout);
+
+    const size_t bound = TLSF_TEST_ALLOC_BOUND;
+
+    /* Three quarters each, so the two together clear the bound once merged
+     * while both still fit under the arena ceiling of twice the bound.
+     */
+    const size_t each = bound - bound / 4;
+
+    /* Guard on what this actually asks for, half again the bound, not on the
+     * bound itself. The two neighbours plus the pin are the whole demand, and
+     * checking only the bound would let the largest accepted configuration
+     * request half again the ceiling and turn resource pressure into a failed
+     * assertion instead of a skip.
+     */
+    const size_t needed = 2 * each + TLSF_TEST_BLOCK_COST;
+    if (needed > TLSF_TEST_BACKABLE_MAX) {
+        printf("skipped (needs %zu bytes, beyond what we can back)\n", needed);
+        return;
+    }
+
+    void *a = tlsf_malloc(t, each);
+    void *b = tlsf_malloc(t, each);
+    void *pin = tlsf_malloc(t, 24);
+    assert(a && b && pin);
+    tlsf_check(t);
+
+    tlsf_free(t, a);
+    tlsf_free(t, b);
+
+    /* Without the merge clearing the bound this test proves nothing, so say so
+     * rather than passing quietly.
+     */
+    tlsf_stats_t stats;
+    assert(tlsf_get_stats(t, &stats) == 0);
+    assert(stats.largest_free > bound);
+
+    tlsf_check(t);
+
+    tlsf_free(t, pin);
+    tlsf_check(t);
+
+    printf("%zu-byte block from coalescing, above the %zu-byte bound, done\n",
+           stats.largest_free, bound);
+}
+
+/* The same defect by a second route: appending to a pool already at the
+ * published fixed-pool ceiling merges the two spans into one free block above
+ * the allocation bound. Uses a fixed pool, so it is independent of the dynamic
+ * arena the coalescing route above exercises.
+ */
+static void oversized_free_block_test(void)
+{
+    printf("Oversized free block test: ");
+    fflush(stdout);
+
+    const size_t ceiling = (size_t) 1 << _TLSF_FL_MAX;
+    if (ceiling > TLSF_TEST_BACKABLE_MAX) {
+        printf(
+            "skipped (arena ceiling %zu bytes exceeds what we can allocate)\n",
+            ceiling);
+        return;
+    }
+
+    /* pool_init takes the published ceiling; the append takes the rest, so the
+     * two spans together are exactly the arena ceiling.
+     */
+    char *mem = (char *) malloc(ceiling);
+    assert(mem);
+    assert((size_t) mem % sizeof(void *) == 0); /* else adj shifts the split */
+
+    tlsf_t t;
+    size_t seeded = tlsf_pool_init(&t, mem, TLSF_MAX_POOL_BYTES);
+    assert(seeded > 0);
+
+    size_t added = tlsf_append_pool(&t, mem + TLSF_MAX_POOL_BYTES,
+                                    ceiling - TLSF_MAX_POOL_BYTES);
+    assert(added > 0);
+
+    /* The point of the test: one free block, larger than any single allocation
+     * may be, still below what the mapping function can index.
+     */
+    tlsf_stats_t stats;
+    assert(tlsf_get_stats(&t, &stats) == 0);
+    assert(stats.free_count == 1);
+    assert(stats.largest_free > TLSF_TEST_ALLOC_BOUND);
+    assert(stats.largest_free < ceiling);
+
+    tlsf_check(&t);
+
+    free(mem);
+    printf("%zu-byte free block above the %zu-byte allocation bound, done\n",
+           stats.largest_free, (size_t) TLSF_TEST_ALLOC_BOUND);
+}
+
+/* A freed block must land in the bin that a same-size request will search, so
+ * free-then-reallocate at the same size reuses the same address. Guards against
+ * a future change that searches with the rounded size but stores the block at
+ * the unrounded one. The block under test is sandwiched between live
+ * allocations so it cannot coalesce and mask the result.
  */
 static void reuse_same_address_test(void)
 {
@@ -1361,6 +1494,8 @@ int main(void)
 
     /* Run pool ceiling test */
     pool_ceiling_test();
+    oversized_free_block_test();
+    coalesced_free_block_test(&t);
 
     puts("OK!");
     return 0;

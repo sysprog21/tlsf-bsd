@@ -7,6 +7,17 @@ FRAMAC ?= frama-c
 # one: 'make verify' proves the helpers consistent with their own contracts,
 # not that the allocator establishes those contracts at the call sites. Extend
 # upward (block_split, block_absorb, block_set_free, ...) to close that gap.
+#
+# Read the goal count for what it is. This list is a subset of the functions
+# defined in src/tlsf.c, and tlsf_pool_reset is the only public entry point on
+# it. tlsf_malloc, tlsf_free, tlsf_realloc, tlsf_aalloc, tlsf_pool_init,
+# tlsf_append_pool, tlsf_usable_size, tlsf_check and tlsf_get_stats are all
+# unproved, as are the internal arena helpers they call.
+# Several listed helpers also have no postcondition, which means "proved" is
+# "cannot fault", not "returns the right answer": injecting a real bug into
+# align_offset still yields a fully proved run, while the same injection into
+# block_set_prev_free, which does carry 'ensures' clauses, is caught. A green
+# run here is a floor, not a certificate.
 WP_FUNCTIONS = \
 	align_up,align_ptr,block_payload,to_block,block_from_payload, \
 	block_is_free,block_is_prev_free,block_can_split,block_can_trim, \
