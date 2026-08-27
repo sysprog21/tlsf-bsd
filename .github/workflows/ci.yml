@@ -89,13 +89,16 @@ jobs:
           - runner: ubuntu-24.04
             cc: gcc
             cflags: "-DTLSF_SPLIT_THRESHOLD=64"
-          # NDEBUG strips libc assert(). The test binaries undefine it
-          # themselves, so they keep reporting pass/fail; without that undef
-          # this row faults in the static pool test, which is the regression
-          # it exists to catch.
+          # Release configuration. NDEBUG covers libc assert(); clearing
+          # TLSF_DEBUG_FLAGS covers the library's own knobs, which are on for
+          # every other entry, so this is the only job that compiles the empty
+          # ASSERT(), the MAYBE_UNUSED machinery it needs, and the tlsf_check()
+          # stub. That is the build users ship. The test binaries undefine
+          # NDEBUG themselves, so they keep reporting pass/fail either way.
           - runner: ubuntu-24.04
             cc: gcc
             cflags: "-DNDEBUG"
+            make_args: "TLSF_DEBUG_FLAGS="
           # Portable bit-scan fallbacks used by toolchains without
           # __builtin_ctz / _BitScanForward. Unreachable on these runners
           # unless forced.
@@ -108,13 +111,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build
-        run: make all
+        run: make all ${{ matrix.make_args }}
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
           CPPFLAGS: ${{ matrix.cflags }}
       - name: Test
-        run: make check
+        run: make check ${{ matrix.make_args }}
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
@@ -215,7 +218,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
       - name: Build (release, no assert/check overhead)
-        run: make all TLSF_DEBUG_FLAGS= CFLAGS="-Iinclude -std=gnu11 -O2 -Wall -Wextra -Wconversion"
+        run: make all TLSF_DEBUG_FLAGS=
       - name: WCET measurement
         run: ./build/wcet -i 5000 -w 500 -r build/wcet_raw.csv | tee build/wcet_output.txt
       - name: Generate plots

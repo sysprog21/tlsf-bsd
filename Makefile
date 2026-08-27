@@ -90,31 +90,61 @@ THREAD_OBJS = $(OUT)/tlsf_thread.o
 deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
 	$(OUT)/bench.d $(OUT)/wcet.d $(THREAD_TARGETS:%=%.d) $(CPP_TARGETS:%=%.d)
 
-$(OUT)/test: $(OBJS) tests/test.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+# Make compares timestamps, not command lines, so flipping a variable on the
+# command line rebuilds nothing. 'make check TLSF_DEBUG_FLAGS=' on an
+# already-built tree would relink against the assertions-enabled objects and
+# report a pass for a configuration it never compiled. Stamping the toolchain
+# and flags, and depending on the stamp, makes any change rebuild. The stamp is
+# rewritten only when the value differs, so a no-op build stays a no-op.
+#
+# The value covers every variable the compile and link recipes expand;
+# -pthread and -lm are literals. One stamp covers all of them, so an
+# LDFLAGS-only change also recompiles the two objects. Rebuilding more than
+# strictly needed is safe, and a second stamp is not worth the machinery here.
+FLAGS_STAMP := $(OUT)/.build-flags
+BUILD_FLAGS := $(CC) $(CXX) $(CPPFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS)
 
-$(OUT)/bench: $(OBJS) tests/bench.c
+# Exported rather than pasted into the recipe text. A flag value may contain a
+# quote, and interpolating one into a quoted shell word would end the string
+# early and kill the recipe on a syntax error. A parameter expansion is not
+# rescanned, so the value survives whatever it holds. Not $(file), which does no
+# shell quoting at all, because it needs make 4.0 and this tree builds on 3.81.
+export BUILD_FLAGS
+FORCE:
+$(FLAGS_STAMP): FORCE
+	@mkdir -p $(OUT)
+	@printf '%s\n' "$$BUILD_FLAGS" | cmp -s - $@ || \
+		printf '%s\n' "$$BUILD_FLAGS" > $@
+
+# The link rules below spell out their sources instead of using $^. The dep
+# files pull headers in as prerequisites, and $(FLAGS_STAMP) is one too, so $^
+# would hand both to the compiler as source files.
+$(OUT)/test: $(OBJS) tests/test.c $(FLAGS_STAMP)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(OBJS) tests/test.c $(LDFLAGS)
+
+$(OUT)/bench: $(OBJS) tests/bench.c $(FLAGS_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/bench.c \
 		$(LDFLAGS) -lm
 
-$(OUT)/wcet: $(OBJS) tests/wcet.c
+$(OUT)/wcet: $(OBJS) tests/wcet.c $(FLAGS_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ -MMD -MF $@.d $(OBJS) tests/wcet.c \
 		$(LDFLAGS) -lm
 
 # Thread-safe module (requires pthreads)
-$(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h
+$(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h $(FLAGS_STAMP)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -c -o $@ -MMD -MF $@.d $<
 
-$(OUT)/test_thread: $(OBJS) $(THREAD_OBJS) tests/test_thread.c
+$(OUT)/test_thread: $(OBJS) $(THREAD_OBJS) tests/test_thread.c \
+		$(FLAGS_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
 		$(THREAD_OBJS) tests/test_thread.c $(LDFLAGS)
 
-$(OUT)/test_cpp: $(OBJS) $(THREAD_OBJS) tests/test_cpp.cpp
+$(OUT)/test_cpp: $(OBJS) $(THREAD_OBJS) tests/test_cpp.cpp $(FLAGS_STAMP)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
 		$(THREAD_OBJS) tests/test_cpp.cpp $(LDFLAGS)
 
-$(OUT)/%.o: src/%.c
+$(OUT)/%.o: src/%.c $(FLAGS_STAMP)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
 
@@ -168,11 +198,11 @@ wcet-plot: all
 
 clean:
 	$(RM) $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
-	$(RM) $(OBJS) $(THREAD_OBJS) $(deps)
+	$(RM) $(OBJS) $(THREAD_OBJS) $(deps) $(FLAGS_STAMP)
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png
 	$(RM) -r $(OUT)/*.dSYM
 
-.PHONY: all check clean verify bench bench-quick wcet wcet-quick wcet-plot
+.PHONY: all check clean verify bench bench-quick wcet wcet-quick wcet-plot FORCE
 
 -include $(deps)
