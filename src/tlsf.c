@@ -1130,7 +1130,7 @@ INLINE bool block_can_expand_prev(tlsf_block_t *block, size_t size)
 
     size_t room =
         block_size(block_prev(block)) + block_size(block) + BLOCK_OVERHEAD;
-    tlsf_block_t *next = block_next(block);
+    const tlsf_block_t *next = block_next(block);
     if (block_is_free(next))
         room += block_size(next) + BLOCK_OVERHEAD;
     return size <= room;
@@ -1643,7 +1643,7 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
 
     /* Do we need to expand? */
     if (size > avail) {
-        tlsf_block_t *next = block_next(block);
+        const tlsf_block_t *next = block_next(block);
 
         /* Three ways to grow, in order of cost: forward costs nothing, backward
          * costs a memmove, relocation costs a copy plus a new block.
