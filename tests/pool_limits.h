@@ -43,6 +43,19 @@
 #define TLSF_TEST_BLOCK_COST \
     (sizeof(struct tlsf_block) - sizeof(struct tlsf_block *) + sizeof(size_t))
 
+/* The minimum remainder tlsf leaves when it trims a block, mirroring the
+ * library default at the top of src/tlsf.c. The macro is internal there, so a
+ * fixture that has to know whether a trim is possible at all must recompute it.
+ * An override reaches both translation units through CPPFLAGS, so honor it when
+ * present rather than assuming the default.
+ */
+#ifdef TLSF_SPLIT_THRESHOLD
+#define TLSF_TEST_SPLIT_THRESHOLD ((size_t) (TLSF_SPLIT_THRESHOLD))
+#else
+#define TLSF_TEST_SPLIT_THRESHOLD \
+    (sizeof(struct tlsf_block) - sizeof(struct tlsf_block *))
+#endif
+
 /* Ceiling on what a fixture may ask the host for in one go. Several tests are
  * only meaningful near a configuration limit that scales with
  * TLSF_MAX_POOL_BITS, which at the default is far past any allocation that

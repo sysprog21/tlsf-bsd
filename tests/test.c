@@ -1107,6 +1107,29 @@ static void small_bin_trim_test(void)
     tlsf_free(&t, big);
     tlsf_check(&t);
 
+    /* A minimal request can only trim this block if what is left over clears
+     * the split threshold. Configure that threshold near the top of the FL=0
+     * range and the allocator correctly refuses to split anything in it, so
+     * there is no trim to measure and the assertions below would be testing the
+     * configuration rather than the fast path. Skip loudly instead of failing:
+     * the library is behaving as configured.
+     *
+     * The bound is deliberately conservative rather than exact. Predicting the
+     * split decision needs the block size the fast path actually found, which
+     * may be larger than the seed after coalescing, so an exact bound derived
+     * from 'seeded' alone gets it wrong near the boundary. Over-skipping costs
+     * a narrow band of coverage; under-skipping turns a correct library into a
+     * failing test, which is worse.
+     */
+    if (TLSF_TEST_SPLIT_THRESHOLD > seeded - TLSF_TEST_BLOCK_COST) {
+        printf(
+            "skipped (split threshold %zu leaves no trimmable remainder "
+            "in a %zu-byte FL=0 block)\n",
+            (size_t) TLSF_TEST_SPLIT_THRESHOLD, seeded);
+        tlsf_free(&t, guard);
+        return;
+    }
+
     /* A minimal request must not swallow the seeded block. */
     void *probe = tlsf_malloc(&t, 1);
     assert(probe);
