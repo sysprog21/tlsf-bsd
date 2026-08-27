@@ -43,6 +43,22 @@
 #define TLSF_TEST_BLOCK_COST \
     (sizeof(struct tlsf_block) - sizeof(struct tlsf_block *) + sizeof(size_t))
 
+/* Ceiling on what a fixture may ask the host for in one go. Several tests are
+ * only meaningful near a configuration limit that scales with
+ * TLSF_MAX_POOL_BITS, which at the default is far past any allocation that
+ * would succeed. They compare their requirement against this and skip with a
+ * reason instead of failing, so a default build stays quiet and a reduced-
+ * ceiling build actually exercises them.
+ */
+#define TLSF_TEST_BACKABLE_MAX ((size_t) 64 << 20)
+
+/* Largest block a single allocation can ever occupy: the biggest request plus
+ * its header. src/tlsf.c static-asserts this equals BLOCK_SIZE_MAX. A free
+ * block may legitimately exceed it after coalescing, which is exactly what the
+ * fixtures that use this constant are there to pin down.
+ */
+#define TLSF_TEST_ALLOC_BOUND (TLSF_MAX_SIZE + sizeof(size_t))
+
 /* Clamp a desired pool size to what this configuration accepts. Usable as an
  * array bound: both operands are integer constant expressions.
  */

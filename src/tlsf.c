@@ -1712,7 +1712,7 @@ void tlsf_check(tlsf_t *t)
 
         /* Size invariants */
         CHECK(bsize >= BLOCK_SIZE_MIN, "block smaller than minimum size");
-        CHECK(bsize <= BLOCK_SIZE_MAX, "block exceeds maximum size");
+        CHECK(bsize < (size_t) 1 << FL_MAX, "block exceeds mapping range");
         CHECK(bsize % ALIGN_SIZE == 0, "block size not aligned");
 
         /* Pointer alignment check */
