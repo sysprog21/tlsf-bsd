@@ -196,42 +196,7 @@
 #define TLSF_LOCK_TRY(l) (pthread_mutex_trylock((l)) == 0)
 #endif
 
-/* Fold upper bits into lower 32 to retain entropy on 64-bit systems. */
-#ifndef TLSF_THREAD_HINT
-#if defined(_TLSF_USE_C11_THREADS)
-#if defined(TLSF_THREAD_WIN)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#define TLSF_THREAD_HINT() ((unsigned) GetCurrentThreadId())
-#elif defined(TLSF_THREAD_POSIX)
-#include <pthread.h>
-#define TLSF_THREAD_HINT()                    \
-    ((unsigned) ((uintptr_t) pthread_self() ^ \
-                 ((uintptr_t) pthread_self() >> 16)))
-#else
-#define TLSF_THREAD_HINT()                    \
-    ((unsigned) ((uintptr_t) thrd_current() ^ \
-                 ((uintptr_t) thrd_current() >> 16)))
-#endif
-#elif defined(TLSF_THREAD_POSIX)
-#define TLSF_THREAD_HINT()                    \
-    ((unsigned) ((uintptr_t) pthread_self() ^ \
-                 ((uintptr_t) pthread_self() >> 16)))
-#elif defined(TLSF_THREAD_WIN)
-#define TLSF_THREAD_HINT() ((unsigned) GetCurrentThreadId())
-#else
-#define TLSF_THREAD_HINT() 0U
-#endif
-#endif
-
 #endif /* TLSF_LOCK_T */
-
-/* Fallback thread hint for custom locks without a custom hint. */
-#ifndef TLSF_THREAD_HINT
-#define TLSF_THREAD_HINT() 0U
-#endif
 
 #if defined(_MSC_VER)
 #define TLSF_MSVC_ALIGN(x) __declspec(align(x))
@@ -242,6 +207,23 @@
 #else
 #define TLSF_MSVC_ALIGN(x)
 #define TLSF_GCC_ALIGN(x)
+#endif
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define TLSF_THREAD_LOCAL thread_local
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define TLSF_THREAD_LOCAL _Thread_local
+#elif defined(__GNUC__) || defined(__clang__)
+#define TLSF_THREAD_LOCAL __thread
+#elif defined(_MSC_VER)
+#define TLSF_THREAD_LOCAL __declspec(thread)
+#endif
+
+#ifdef TLSF_THREAD_LOCAL
+/* Offset on 12 bit is more correct here cause addresses will be different
+ * only in least significant bits.
+ */
+#define TLSF_THREAD_HINT_AUX(x) ((x ^ (x >> 12)))
 #endif
 
 /* Number of independent arenas. Each arena has its own lock and TLSF pool, so N
