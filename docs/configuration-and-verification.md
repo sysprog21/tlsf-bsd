@@ -58,7 +58,7 @@ is always a legal block, and at most `BLOCK_SIZE_MAX`, so the arithmetic in
 |------|---------|--------|
 | `TLSF_ARENA_COUNT` | 4 | Independent sub-pools, each with its own lock |
 | `TLSF_CACHELINE_SIZE` | 64 | Per-arena padding, must be a power of two |
-| `TLSF_C11_THREADS` | off | Prefer the C11 `<threads.h>` backend where available |
+| `TLSF_C11_THREADS` | off | The C11 `<threads.h>` backend, where available |
 | `TLSF_LOCK_T` plus five macros | platform default | A caller-supplied lock backend |
 | `TLSF_THREAD_HINT()` | platform thread id | Hash input for arena selection |
 
@@ -137,13 +137,17 @@ Undefined symbols for architecture arm64:
 ```
 
 `w64` is `_TLSF_SIZE_WIDTH`, `fl20` is `_TLSF_FL_MAX`. The thread wrapper adds
-its own tags for `TLSF_ARENA_COUNT`, `TLSF_CACHELINE_SIZE` and whether the C11
-threads backend was selected.
+its own tags for `TLSF_ARENA_COUNT`, `TLSF_CACHELINE_SIZE` and which lock
+backend the header selected.
 
-That last tag is a single bit, so it catches a C11-versus-native disagreement but
-not `SRWLOCK` versus `CRITICAL_SECTION`, and not a caller-supplied
-`TLSF_LOCK_T`. Those change `sizeof(TLSF_LOCK_T)` and therefore the arena
-stride, and they remain a caller obligation.
+That last tag names the backend rather than recording C11-or-not, so it covers
+`SRWLOCK` versus `CRITICAL_SECTION` too, the pair no build flag chooses between.
+A caller-supplied `TLSF_LOCK_T` stays outside it: the header makes no selection
+to record, while the lock type still moves the fields stored behind it in each
+arena, so that one remains a caller obligation. Do not reach for `sizeof` in its
+place. The cache-line padding hides a lock-size change from the arena stride
+until it crosses a whole line, so two incompatible builds usually measure the
+same.
 
 Four consequences worth knowing:
 

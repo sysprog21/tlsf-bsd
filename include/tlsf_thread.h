@@ -36,10 +36,6 @@
 
 #pragma once
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include "tlsf.h"
 
 #include <stddef.h>
@@ -70,21 +66,71 @@ extern "C" {
  */
 
 #ifndef TLSF_LOCK_T
-/* It is possible to switch to C11 threads. For this define TLSF_C11_THREADS
- * macro in this header here
+/* Define TLSF_C11_THREADS to select the C11 '<threads.h>' backend. It reaches
+ * the public symbol names, so it belongs in the build system and has to be seen
+ * by every translation unit or by none, exactly as tlsf.h asks of its own
+ * knobs.
+ *
+ * The arms below answer one question, "is there a '<threads.h>' to use", by
+ * whatever means the dialect offers, and they have to answer it alike or the
+ * two languages end up on different layouts.
+ *
+ * __STDC_NO_THREADS__ is therefore tested once, ahead of the split, and not
+ * inside any arm. The name says C, the practice does not: clang defines it in
+ * C++ mode, and defines it for its MSVC targets in both languages. An arm that
+ * skipped it would answer differently from an arm that did not, which is how
+ * clang-cl came to pick C11 threads from C and the native lock from C++ off the
+ * same flag.
+ *
+ * After that, C++ has no __STDC_VERSION__ to read and no compiler switch to
+ * demand, so the header's own presence is the evidence. __has_include is tested
+ * for before it is used, and the toolset version answers where it is missing.
+ * That fallback should never fire: GCC and clang offer the probe in every mode,
+ * and MSVC has offered it since VS 2017 15.3, well below the version this arm
+ * would then have to accept. It stays because the cost is two lines and the
+ * failure it covers is the one this change exists to remove, a C++ unit quietly
+ * on the native lock beside a C unit on 'mtx_t' off one flag. C11 threads ship
+ * in the VC runtime, not the Windows SDK, and arrived in VS 2022 17.8 together
+ * with 'vcruntime140_threads.dll'; that is where 1938 comes from. C reaches the
+ * same number through its own arm, which can also say what is wrong, an error
+ * no C++ build could have acted on.
+ *
+ * The generic C arm probes as well, for the mirror-image case: a C11 compiler
+ * that promises threads through __STDC_VERSION__ against a libc that ships no
+ * header. Taking its word there would fail on the include below while the C++
+ * unit beside it quietly took the native lock. Where the probe is missing the
+ * promise is all there is, which is where this arm started.
+ *
+ * That leaves g++ against a C library that sets __STDC_NO_THREADS__ while still
+ * shipping the header, where C declines and C++ accepts. The flag is opt-in,
+ * and the ABI suffix turns the disagreement into a link error rather than a
+ * corrupt 'tlsf_thread_t'.
  */
-#if defined(_MSC_VER) && defined(TLSF_C11_THREADS)
-#if (_MSC_VER < 1935)
-#error Incompatible Visual C++ version. Requires VS 2022 17.5+ for C11 threads support.
+#if defined(TLSF_C11_THREADS) && !defined(__STDC_NO_THREADS__)
+#if defined(__cplusplus)
+#if defined(__has_include)
+#if __has_include(<threads.h>)
+#define _TLSF_USE_C11_THREADS 1
+#endif
+#elif defined(_MSC_VER) && (_MSC_VER >= 1938)
+#define _TLSF_USE_C11_THREADS 1
+#endif
+#elif defined(_MSC_VER)
+#if (_MSC_VER < 1938)
+#error Incompatible Visual C++ version. Requires VS 2022 17.8+ for C11 threads support.
 #elif !defined(__STDC_VERSION__) || (__STDC_VERSION__ < 201112L)
 #error MSVC /std:c11 compiler switch is missing! Please enable C11 standard or higher in project properties.
 #else
-#define C11_THREADS_SUPPORT 1
+#define _TLSF_USE_C11_THREADS 1
+#endif
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#if defined(__has_include)
+#if __has_include(<threads.h>)
+#define _TLSF_USE_C11_THREADS 1
 #endif
 #else
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && \
-    !defined(__STDC_NO_THREADS__)
-#define C11_THREADS_SUPPORT 1
+#define _TLSF_USE_C11_THREADS 1
+#endif
 #endif
 #endif
 
@@ -95,12 +141,7 @@ extern "C" {
 #define TLSF_THREAD_POSIX
 #endif
 
-#if (defined(TLSF_THREAD_WIN) && defined(C11_THREADS_SUPPORT)) || \
-    (defined(TLSF_C11_THREADS) && defined(C11_THREADS_SUPPORT))
-#define USE_C11_THREADS 1
-#endif
-
-#if defined(USE_C11_THREADS)
+#if defined(_TLSF_USE_C11_THREADS)
 #include <threads.h>
 #elif defined(TLSF_THREAD_POSIX)
 #include <pthread.h>
@@ -123,7 +164,7 @@ extern "C" {
 #endif
 #endif
 
-#if defined(USE_C11_THREADS)
+#if defined(_TLSF_USE_C11_THREADS)
 #define TLSF_LOCK_T mtx_t
 /* C11 does not require thrd_success to be 0, so normalize it. */
 #define TLSF_LOCK_INIT(l) (mtx_init((l), mtx_plain) == thrd_success ? 0 : -1)
@@ -157,7 +198,7 @@ extern "C" {
 
 /* Fold upper bits into lower 32 to retain entropy on 64-bit systems. */
 #ifndef TLSF_THREAD_HINT
-#if defined(USE_C11_THREADS)
+#if defined(_TLSF_USE_C11_THREADS)
 #if defined(TLSF_THREAD_WIN)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -231,41 +272,72 @@ TLSF_STATIC_ASSERT(TLSF_ARENA_COUNT >= 1, "TLSF_ARENA_COUNT must be >= 1");
 TLSF_STATIC_ASSERT((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
                    "TLSF_CACHELINE_SIZE must be a power of two");
 
-/* Which lock backend was selected, not which macro the caller passed. The
- * layout follows 'USE_C11_THREADS', and that is set either by TLSF_C11_THREADS
- * or on Windows whenever the compiler supports C11 threads, so keying this off
- * TLSF_C11_THREADS would both miss a real difference and invent one where the
- * flag changes nothing. A caller-supplied TLSF_LOCK_T skips the whole
- * selection, leaving this zero, which is why that case stays a caller
- * obligation.
+/* Which lock backend was selected, not which macro the caller passed. Every arm
+ * of the selection above lands on a different lock type, and two units that
+ * disagree about which one then disagree about 'base' and 'capacity', which sit
+ * behind the lock inside 'tlsf_arena_t'. Do not look for the damage in the
+ * arena stride. The cache-line padding absorbs a lock-size change until it
+ * crosses a whole line, so 'SRWLOCK' at one pointer and 'CRITICAL_SECTION' at
+ * 40 bytes give a byte-identical 'sizeof(tlsf_thread_t)'. Equal sizes are the
+ * ordinary case, not the exception, which is why the choice is encoded whole
+ * rather than measured or reduced to a C11-or-not flag.
+ *
+ * A boolean would miss the pair that needs it most. Nothing in the build system
+ * picks between 'SRWLOCK' and 'CRITICAL_SECTION': the header decides from
+ * '_WIN32_WINNT' and the compiler version, which a caller can set per
+ * translation unit, and a mismatched pair would then link cleanly, write the
+ * two fields at different offsets, and pass storage prepared by
+ * 'InitializeSRWLock' to 'EnterCriticalSection'.
+ *
+ * Keying off TLSF_C11_THREADS instead would both miss a real difference and
+ * invent one where the flag changes nothing, since the same flag reaches
+ * translation units whose toolchain has no '<threads.h>' to select. A
+ * caller-supplied TLSF_LOCK_T skips the whole selection, leaving this zero,
+ * which is why that case stays a caller obligation.
  */
-#if defined(USE_C11_THREADS)
-#define _TLSF_THREAD_C11_THREADS 1
+#if defined(_TLSF_USE_C11_THREADS)
+#define _TLSF_THREAD_BACKEND 1
+#elif defined(TLSF_THREAD_WIN_SRWLOCK)
+#define _TLSF_THREAD_BACKEND 2
+#elif defined(TLSF_THREAD_WIN_CRSECTION)
+#define _TLSF_THREAD_BACKEND 3
+#elif defined(TLSF_THREAD_POSIX)
+#define _TLSF_THREAD_BACKEND 4
 #else
-#define _TLSF_THREAD_C11_THREADS 0
+#define _TLSF_THREAD_BACKEND 0
 #endif
 
 /* Same hazard as the core allocator, and the same remedy: 'tlsf_thread_t' is
  * caller-allocated and its layout moves with TLSF_ARENA_COUNT,
  * TLSF_CACHELINE_SIZE and the embedded 'tlsf_t', so a translation unit that
  * disagrees about any of them corrupts the caller's object on the first call.
- * The core ABI suffix plus the thread-specific knobs, including the C11-threads
- * configuration, turn that into a link error. See the matching block in tlsf.h.
+ * The core ABI suffix plus the thread-specific knobs, including the selected
+ * lock backend, turn that into a link error. See the matching block in tlsf.h.
  *
  * A custom TLSF_LOCK_T also moves the layout and cannot be encoded in a token,
  * so it stays a caller obligation: define it in one place every translation
  * unit sees, the way the lock macros already have to be.
  *
- * _TLSF_ABI_EVAL comes from tlsf.h, included above, under the same __FRAMAC__
- * condition. Keep the two guards identical: relaxing one alone leaves this
- * block referring to a macro that no longer exists.
+ * One flat '##' chain fed by a single expansion layer, for the reason tlsf.h
+ * gives. The core half of the suffix is spelled again here rather than wrapped
+ * around _TLSF_ABI, because wrapping is the nesting that broke. Keep the two
+ * spellings in step; check-abi-guard.sh fails the thread target on a core knob
+ * if they drift. Parameters are not named for the separator letters they sit
+ * beside, or 'a##a' would paste the arena count to itself and drop the
+ * separator.
+ *
+ * Guarded on __FRAMAC__ like tlsf.h: relaxing one alone would suffix the
+ * wrapper's names while leaving the core's plain, or the reverse.
  */
 #ifndef __FRAMAC__
-#define _TLSF_THREAD_ABI(name)                                                \
-    _TLSF_ABI_EVAL(                                                           \
-        _TLSF_ABI_EVAL(_TLSF_ABI(name), _TLSF_ABI_EVAL(a, TLSF_ARENA_COUNT)), \
-        _TLSF_ABI_EVAL(_TLSF_ABI_EVAL(c, TLSF_CACHELINE_SIZE),                \
-                       _TLSF_ABI_EVAL(t, _TLSF_THREAD_C11_THREADS)))
+#define _TLSF_THREAD_ABI_PASTE(name, wid, flm, arena, cache, bk) \
+    name##_w##wid##_fl##flm##a##arena##c##cache##t##bk
+#define _TLSF_THREAD_ABI_EVAL(name, wid, flm, arena, cache, bk) \
+    _TLSF_THREAD_ABI_PASTE(name, wid, flm, arena, cache, bk)
+#define _TLSF_THREAD_ABI(name)                                   \
+    _TLSF_THREAD_ABI_EVAL(name, _TLSF_SIZE_WIDTH, _TLSF_FL_MAX,  \
+                          TLSF_ARENA_COUNT, TLSF_CACHELINE_SIZE, \
+                          _TLSF_THREAD_BACKEND)
 
 #define tlsf_thread_init _TLSF_THREAD_ABI(tlsf_thread_init)
 #define tlsf_thread_destroy _TLSF_THREAD_ABI(tlsf_thread_destroy)
@@ -276,6 +348,17 @@ TLSF_STATIC_ASSERT((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
 #define tlsf_thread_check _TLSF_THREAD_ABI(tlsf_thread_check)
 #define tlsf_thread_stats _TLSF_THREAD_ABI(tlsf_thread_stats)
 #define tlsf_thread_reset _TLSF_THREAD_ABI(tlsf_thread_reset)
+#endif
+
+/* Everything above is includes, macros and static assertions, none of which
+ * needs C linkage, and one of the includes is '<threads.h>' or '<windows.h>'.
+ * Opening the block here rather than at the top of the file keeps those system
+ * headers out of it. A C++ unit only started reaching '<threads.h>' when the
+ * selection above grew its C++ arm, so this is the one placement that does not
+ * rest on a system header tolerating a language linkage it never asked for.
+ */
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 TLSF_MSVC_ALIGN(TLSF_CACHELINE_SIZE) typedef struct {

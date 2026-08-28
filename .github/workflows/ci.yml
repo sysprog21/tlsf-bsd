@@ -159,6 +159,15 @@ jobs:
           - runner: ubuntu-24.04
             cc: gcc
             cflags: "-DTLSF_SPLIT_THRESHOLD=64"
+          # C11 threads reaching both languages at once. 'make check' links
+          # tests/test_cpp.cpp against the same src/tlsf_thread.c object, so the
+          # C and the C++ unit have to select the same lock backend from the
+          # same flag. Before the C++ arm of that selection existed this entry
+          # failed to link, which is issue #40 spelled in glibc rather than
+          # MSVC. glibc has had '<threads.h>' since 2.28.
+          - runner: ubuntu-24.04
+            cc: gcc
+            cflags: "-DTLSF_C11_THREADS"
           # Release configuration. NDEBUG covers libc assert(); clearing
           # TLSF_DEBUG_FLAGS covers the library's own knobs, which are on for
           # every other entry, so this is the only job that compiles the empty
@@ -257,6 +266,59 @@ jobs:
       - name: Run Multi-Threaded Tests
         run: |
           .\test_thread.exe
+      # Neither step below passes /DTLSF_C11_THREADS, and that is the test: the
+      # C unit and the C++ unit have to agree on the lock backend and on the
+      # token paste, or the link fails on an unresolved 'tlsf_thread_*' symbol.
+      # Reverting either half of the fix fails here. This pair is also the only
+      # place MSVC's two preprocessors meet, since /std:c11 implies
+      # /Zc:preprocessor and /std:c++14 does not.
+      #
+      # The wrapper compiles in its own step because a step reports the exit
+      # status of its last command only, which would hide a failed compile and
+      # link the stale object left by the C11 step above.
+      - name: Compile Thread Wrapper for the C++ Link
+        run: |
+          cl.exe /c /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf_thread.c /Fo:tlsf_thread.obj
+      - name: Compile C++ TLSF Test with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c++14 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\test_cpp.cpp tlsf.obj tlsf_thread.obj /Fe:test_cpp.exe
+      - name: Run C++ TLSF Test
+        run: |
+          .\test_cpp.exe
+      # The same pair with the flag on both units, which is what the reporter
+      # of issue #40 was after. MSVC ships '<threads.h>' from 17.8 on, so the
+      # C++ unit finds it through __has_include and has to land on the same
+      # 'mtx_t' layout the C unit picked. This is also the only check that MSVC
+      # can preprocess and compile that header outside C mode at all; if it
+      # cannot, the C++ arm of the selection has to go back to declining.
+      #
+      # /std:c++14 is MSVC's default and the mode a user reaches without asking,
+      # so it is the one worth testing. It reaches 'mtx_t' through the C++ arm's
+      # __has_include probe; the version fallback beside that probe is not
+      # exercised here and is not expected to be, see the header.
+      - name: Compile Thread Wrapper for the C++ C11 Link
+        run: |
+          cl.exe /c /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf_thread.c /Fo:tlsf_thread_c11.obj
+      - name: Compile C++ TLSF Test with MSVC (C11)
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c++14 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS tests\test_cpp.cpp tlsf.obj tlsf_thread_c11.obj /Fe:test_cpp_c11.exe
+      - name: Run C++ TLSF Test (C11)
+        run: |
+          .\test_cpp_c11.exe
+      # The stress test on the lock a Windows user now gets without asking.
+      # Until the selection above changed, every MSVC build reached 'mtx_t'
+      # whether or not it asked for it, so 'SRWLOCK' was unreachable and went
+      # unrun; it is the default from here on. The C++ steps compile it but call
+      # the wrapper once each on one thread, so nothing else in this job would
+      # notice a wrong polarity in TLSF_LOCK_TRY or an acquire paired with the
+      # wrong release. Last of the wrapper steps because it recompiles
+      # 'tlsf_thread.obj' in the working directory as a side effect.
+      - name: Compile Multi-Threaded TLSF with MSVC (native lock)
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK src\tlsf_thread.c tests\test_thread.c tlsf.obj /Fe:test_thread_native.exe
+      - name: Run Multi-Threaded Tests (native lock)
+        run: |
+          .\test_thread_native.exe
       - name: Compile Benchmark TLSF with MSVC
         run: |
           cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\bench.c tlsf.obj /Fe:bench_tlsf.exe /link Psapi.lib
