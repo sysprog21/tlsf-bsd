@@ -11,12 +11,10 @@
  *
  * Instead of a single coarse mutex around the entire allocator, the pool is
  * split into TLSF_ARENA_COUNT independent sub-pools (arenas), each with its own
- * lock. An allocation prefers the arena at mix(TLSF_THREAD_HINT()) modulo the
+ * lock. An allocation prefers the arena at mix(get_thread_hint()) modulo the
  * live arena count, so allocations from different threads usually hit different
  * locks. Nothing guarantees distinct arenas: hints can collide, and an arena
- * that is locked or full is skipped for another. Where TLSF_THREAD_HINT()
- * cannot identify a thread it is the constant 0, which funnels every thread to
- * arena 0 and forfeits the whole benefit; see the lock abstraction below.
+ * that is locked or full is skipped for another.
  *
  * Thread-safety contract (same as POSIX malloc/free):
  * - Different threads may call any API function concurrently.
@@ -43,11 +41,7 @@
 
 /* Lock abstraction
  *
- * Override ALL six lock macros together before including this header. When
- * providing custom locks, also define TLSF_THREAD_HINT() to return a
- * thread-specific unsigned integer for arena selection. Without it the hint
- * falls back to the constant 0, every thread selects arena 0, and the per-arena
- * locking degenerates to a single lock.
+ * Override ALL six lock macros together before including this header.
  *
  * TLSF_LOCK_INIT must evaluate to an int: 0 on success, non-zero on failure.
  * tlsf_thread_init() checks it and aborts initialization if a lock cannot be
@@ -61,7 +55,6 @@
  *   #define TLSF_LOCK_ACQUIRE(l)  xSemaphoreTake(*(l), portMAX_DELAY)
  *   #define TLSF_LOCK_RELEASE(l)  xSemaphoreGive(*(l))
  *   #define TLSF_LOCK_TRY(l)      (xSemaphoreTake(*(l),0)==pdTRUE)
- *   #define TLSF_THREAD_HINT()    ((unsigned)uxTaskGetTaskNumber(NULL))
  *   #include "tlsf_thread.h"
  */
 
@@ -222,8 +215,9 @@
 #ifdef TLSF_THREAD_LOCAL
 /* Offset on 12 bit is more correct here cause addresses will be different
  * only in least significant bits.
- */
-#define TLSF_THREAD_HINT_AUX(x) ((x ^ (x >> 12)))
+*/
+#define TLSF_THREAD_HINT_AUX(x) \
+    ((x ^ ( x >> 12)))
 #endif
 
 /* Number of independent arenas. Each arena has its own lock and TLSF pool, so N
