@@ -28,19 +28,12 @@ paper, so no GPL restrictions apply.
 * Pool extension via `tlsf_append_pool` (coalesces adjacent memory)
 * Realloc with in-place expansion, forward into a free successor, or backward
   into a free predecessor while absorbing a free successor in the same step
-* Heap statistics and three-phase consistency checking
-* WCET measurement infrastructure, using hardware cycle counters where the
-  target has them
 * Branch-free size-to-bin mapping
 * Optional thread-safe wrapper (`tlsf_thread.h`)
   with per-arena fine-grained locking; pthreads, C11 threads and Win32 backends,
   and configurable lock primitives for RTOS portability
-* Layout-affecting configuration mismatches between translation units fail at
-  link time rather than corrupting the caller's `tlsf_t`
 * Public headers compile as both C and C++
 * ACSL contracts on the core helpers, checked by Frama-C WP (`make verify`)
-* Fuzz target with a payload-overlap oracle, and a line-coverage floor in CI
-* ~1900 lines of core allocator code
 * Minimal libc as shipped: only `stddef.h`, `stdbool.h`, `stdint.h`,
   `string.h`. Debug builds add `assert.h`, and `TLSF_ENABLE_CHECK` adds
   `stdio.h` and `stdlib.h` for the abort path
