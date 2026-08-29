@@ -1330,10 +1330,10 @@ static void trim_boundary_test(void)
         return;
     }
 
-    /* An unaligned split threshold is legal and the library is right under
-     * one: block sizes and adjusted requests are both alignment multiples, so
-     * their difference is too and never equals an unaligned min_total. The
-     * boundary is unreachable, not broken, so skip rather than fail.
+    /* An unaligned split threshold is legal and the library is right under one:
+     * block sizes and adjusted requests are both alignment multiples, so their
+     * difference is too and never equals an unaligned min_total. The boundary
+     * is unreachable, not broken, so skip rather than fail.
      */
     if (remainder % sizeof(size_t)) {
         printf(
@@ -1482,8 +1482,8 @@ static void pool_ceiling_test(void)
            align);
 }
 
-/* The claim the whole largest_free change rests on: the reported figure names
- * a size malloc() will serve, not merely a block that exists.
+/* The claim the whole largest_free change rests on: the reported figure names a
+ * size malloc() will serve, not merely a block that exists.
  */
 static void assert_largest_free_allocatable(tlsf_t *t, size_t largest)
 {
@@ -1596,8 +1596,8 @@ static void oversized_free_block_test(void)
     assert(tlsf_get_stats(&t, &stats) == 0);
     assert(stats.free_count == 1);
 
-    /* free_count is 1, so total_free is that block. largest_free is clamped
-     * and cannot show that it exceeds any single allocation.
+    /* free_count is 1, so total_free is that block. largest_free is clamped and
+     * cannot show that it exceeds any single allocation.
      */
     assert(stats.total_free > TLSF_MAX_SIZE);
     assert(stats.total_free < ceiling);
@@ -1621,11 +1621,11 @@ static void largest_free_rounding_test(void)
     printf("Largest-free rounding test: ");
     fflush(stdout);
 
-    /* The pool must already be ALIGN_SIZE-aligned. pool_init() would
-     * otherwise skip up to ALIGN_SIZE-1 bytes to align it and the expected
-     * figure below would move. A size_t array gives exactly that alignment;
-     * max_align_t would too, but MSVC does not declare it in C mode. 1056 is
-     * a multiple of sizeof(size_t) at both widths, so the span is exact.
+    /* The pool must already be ALIGN_SIZE-aligned. pool_init() would otherwise
+     * skip up to ALIGN_SIZE-1 bytes to align it and the expected figure below
+     * would move. A size_t array gives exactly that alignment; max_align_t
+     * would too, but MSVC does not declare it in C mode. 1056 is a multiple of
+     * sizeof(size_t) at both widths, so the span is exact.
      */
     size_t pool[1056 / sizeof(size_t)];
     tlsf_t t;
