@@ -174,9 +174,18 @@ check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS) check-negative
 	./build/test_thread
 	./build/test_cpp
 
-# Each case must abort with a CHECK diagnostic, not a segfault that looks like
-# one. Two ways this fails open, both closed here: a fixture broken in seed()
-# would abort every case alike, so the control run goes first; a build without
+# Each case must abort with the CHECK diagnostic it names, not with a segfault
+# that looks like one and not with some other check that happens to fire first.
+# The driver prints the expected message under -e, so the two halves of a case
+# cannot drift apart without this failing.
+#
+# The trailing separator in the pattern below is what makes the message whole
+# rather than a prefix of it. Without it a case naming "prev_free bit mismatch"
+# would also accept "sentinel prev_free bit mismatch", which is a different
+# check in a different walk.
+#
+# Two ways this fails open, both closed here: a fixture broken in seed() would
+# abort every case alike, so the control run goes first; a build without
 # TLSF_ENABLE_CHECK has no rejection to observe, so the driver reports zero
 # cases and this skips. The count arrives as an exit status, so a driver that
 # dies at startup yields a number past the last case, which the driver itself
@@ -194,14 +203,18 @@ check-negative: $(OUT)/check_negative
 	fi; \
 	i=0; \
 	while [ "$$i" -lt "$$n" ]; do \
+		if ! want=$$(./$(OUT)/check_negative -e $$i 2>&1); then \
+			echo "check_negative: case $$i has no expected message:" >&2; \
+			echo "$$want" >&2; exit 1; \
+		fi; \
 		if out=$$(./$(OUT)/check_negative $$i 2>&1); then \
 			echo "check_negative: case $$i accepted by tlsf_check()" >&2; \
 			exit 1; \
 		fi; \
 		case "$$out" in \
-		*"TLSF CHECK:"*) ;; \
-		*) echo "check_negative: case $$i failed with no CHECK diagnostic:" \
-			>&2; echo "$$out" >&2; exit 1 ;; \
+		*"TLSF CHECK: $$want - "*) ;; \
+		*) echo "check_negative: case $$i wanted \"$$want\", got:" >&2; \
+			echo "$$out" >&2; exit 1 ;; \
 		esac; \
 		i=$$((i + 1)); \
 	done; \
