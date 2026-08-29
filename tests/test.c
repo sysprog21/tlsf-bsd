@@ -1270,6 +1270,91 @@ static void small_bin_trim_test(void)
            seeded, got);
 }
 
+/* block_can_trim()'s bound is inclusive: a block exactly large enough to leave
+ * BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD behind must still split. Making it
+ * exclusive wastes a few bytes per allocation, which no throughput figure or
+ * consistency check notices, and the suite passed with it. The block here is
+ * that exact size, so an off-by-one either way changes the outcome.
+ */
+static void trim_boundary_test(void)
+{
+    printf("Trim boundary test: ");
+    fflush(stdout);
+
+    /* Both sizes must sit in the FL=0 linear range, where rounding is the
+     * identity; above it the block built is not the one reasoned about here.
+     */
+    const size_t fast_path_max = (size_t) 1 << _TLSF_FL_SHIFT;
+    const size_t remainder = sizeof(size_t) + TLSF_TEST_SPLIT_THRESHOLD;
+    const size_t req = fast_path_max / 4;
+    const size_t exact = req + remainder;
+    if (exact >= fast_path_max) {
+        printf(
+            "skipped (split threshold %zu leaves no room below the %zu-byte "
+            "FL=0 ceiling)\n",
+            (size_t) TLSF_TEST_SPLIT_THRESHOLD, fast_path_max);
+        return;
+    }
+
+    /* An unaligned split threshold is legal and the library is right under
+     * one: block sizes and adjusted requests are both alignment multiples, so
+     * their difference is too and never equals an unaligned min_total. The
+     * boundary is unreachable, not broken, so skip rather than fail.
+     */
+    if (remainder % sizeof(size_t)) {
+        printf(
+            "skipped (split threshold %zu is not alignment-sized, so the "
+            "boundary cannot be hit)\n",
+            (size_t) TLSF_TEST_SPLIT_THRESHOLD);
+        return;
+    }
+
+    static char pool[TLSF_TEST_POOL_CLAMP(64 * 1024)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+    /* Live neighbours, so freeing the donor cannot coalesce it past the
+     * boundary being measured.
+     */
+    void *lo = tlsf_malloc(&t, 64);
+    void *donor = tlsf_malloc(&t, exact);
+    void *hi = tlsf_malloc(&t, 64);
+    assert(lo && donor && hi);
+    assert(tlsf_usable_size(donor) == exact); /* else rounding moved it */
+
+    void *addr = donor;
+    tlsf_free(&t, donor);
+    tlsf_check(&t);
+
+    tlsf_stats_t before;
+    assert(tlsf_get_stats(&t, &before) == 0);
+
+    /* The donor is the smallest free block, so the search lands on it and
+     * leaves exactly the threshold. That it lands there is a fixture
+     * assumption, asserted rather than trusted: without it the checks below
+     * would pass on a block from the pool tail and prove nothing.
+     */
+    void *p = tlsf_malloc(&t, req);
+    assert(p == addr);
+    assert(tlsf_usable_size(p) == req);
+
+    /* Trimmed: donor became one used block plus one free remainder, so the
+     * count holds. Handing out the whole block would drop it.
+     */
+    tlsf_stats_t after;
+    assert(tlsf_get_stats(&t, &after) == 0);
+    assert(after.free_count == before.free_count);
+
+    tlsf_check(&t);
+    tlsf_free(&t, p);
+    tlsf_free(&t, lo);
+    tlsf_free(&t, hi);
+    tlsf_check(&t);
+
+    printf("%zu-byte block split at a %zu-byte remainder, done\n", exact,
+           remainder);
+}
+
 /* Null arguments and requests past TLSF_MAX_SIZE.
  *
  * The null rejects and the TLSF_MAX_SIZE bound are reached by nothing else in
@@ -1717,6 +1802,7 @@ int main(void)
 
     /* Run small-bin trim test */
     small_bin_trim_test();
+    trim_boundary_test();
 
     /* Run pool ceiling test */
     pool_ceiling_test();
