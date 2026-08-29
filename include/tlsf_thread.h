@@ -11,10 +11,14 @@
  *
  * Instead of a single coarse mutex around the entire allocator, the pool is
  * split into TLSF_ARENA_COUNT independent sub-pools (arenas), each with its own
- * lock. An allocation prefers the arena at mix(get_thread_hint()) modulo the
- * live arena count, so allocations from different threads usually hit different
- * locks. Nothing guarantees distinct arenas: hints can collide, and an arena
- * that is locked or full is skipped for another.
+ * lock. An allocation prefers the arena at mix(thread local variable address or
+ * optional by user TLSF_THREAD_HINT()) modulo the live arena count, so
+ * allocations from different threads usually hit different locks. Nothing
+ * guarantees distinct arenas: hints can collide, and an arena that is locked or
+ * full is skipped for another. Where thread local varibales øû not available or
+ * TLSF_THREAD_HINT() is not identified a thread it is the constant 0, which
+ * funnels every thread to arena 0 and forfeits the whole benefit; see the lock
+ * abstraction below.
  *
  * Thread-safety contract (same as POSIX malloc/free):
  * - Different threads may call any API function concurrently.
@@ -202,6 +206,10 @@
 #define TLSF_GCC_ALIGN(x)
 #endif
 
+/* Define here optional TLSF_THREAD_HINT()
+ * if thread local storage is not available.
+ */
+#if !defined(TLSF_THREAD_HINT)
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #define TLSF_THREAD_LOCAL thread_local
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
@@ -211,12 +219,10 @@
 #elif defined(_MSC_VER)
 #define TLSF_THREAD_LOCAL __declspec(thread)
 #endif
+#endif
 
 #ifdef TLSF_THREAD_LOCAL
-/* Offset on 12 bit is more correct here cause addresses will be different
- * only in least significant bits.
- */
-#define TLSF_THREAD_HINT_AUX(x) \
+#define TLSF_THREAD_SHIFTXOR(x) \
     ((unsigned) ((uintptr_t) x ^ ((uintptr_t) x >> 16)))
 #endif
 
