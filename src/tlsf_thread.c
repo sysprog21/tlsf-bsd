@@ -22,7 +22,7 @@ static TLSF_THREAD_LOCAL unsigned int tlsf_thread_id = 0;
 static inline unsigned int get_thread_hint(void)
 {
 #ifdef TLSF_THREAD_HINT_AUX
-    unsigned int thread_unique_address = (uintptr_t) (&tlsf_thread_id);
+    uintptr_t thread_unique_address = (uintptr_t) (&tlsf_thread_id);
     return TLSF_THREAD_HINT_AUX(thread_unique_address);
 #else
     return 0U;

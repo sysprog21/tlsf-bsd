@@ -215,9 +215,9 @@
 #ifdef TLSF_THREAD_LOCAL
 /* Offset on 12 bit is more correct here cause addresses will be different
  * only in least significant bits.
-*/
+ */
 #define TLSF_THREAD_HINT_AUX(x) \
-    ((x ^ ( x >> 12)))
+    ((unsigned) ((uintptr_t) x ^ ((uintptr_t) x >> 16)))
 #endif
 
 /* Number of independent arenas. Each arena has its own lock and TLSF pool, so N
