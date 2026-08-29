@@ -1363,6 +1363,17 @@ static void pool_ceiling_test(void)
            align);
 }
 
+/* The claim the whole largest_free change rests on: the reported figure names
+ * a size malloc() will serve, not merely a block that exists.
+ */
+static void assert_largest_free_allocatable(tlsf_t *t, size_t largest)
+{
+    assert(largest <= TLSF_MAX_SIZE);
+    void *p = tlsf_malloc(t, largest);
+    assert(p);
+    tlsf_free(t, p);
+}
+
 /* A coalesced free block may exceed BLOCK_SIZE_MAX, which bounds a single
  * allocation. The structural cap is the arena ceiling of 2^_TLSF_FL_MAX, what
  * the mapping function can index, so a heap check that reused the allocation
@@ -1408,20 +1419,22 @@ static void coalesced_free_block_test(tlsf_t *t)
     tlsf_free(t, a);
     tlsf_free(t, b);
 
-    /* Without the merge clearing the bound this test proves nothing, so say so
-     * rather than passing quietly.
+    /* Without the merge this proves nothing. largest_free is clamped to
+     * TLSF_MAX_SIZE, hiding the merged size, so guard on 'each': only a block
+     * built from both neighbours clears a single one.
      */
     tlsf_stats_t stats;
     assert(tlsf_get_stats(t, &stats) == 0);
-    assert(stats.largest_free > bound);
+    assert(stats.largest_free > each);
+    assert_largest_free_allocatable(t, stats.largest_free);
 
     tlsf_check(t);
 
     tlsf_free(t, pin);
     tlsf_check(t);
 
-    printf("%zu-byte block from coalescing, above the %zu-byte bound, done\n",
-           stats.largest_free, bound);
+    printf("%zu-byte allocatable block from coalescing, done\n",
+           stats.largest_free);
 }
 
 /* The same defect by a second route: appending to a pool already at the
@@ -1463,14 +1476,48 @@ static void oversized_free_block_test(void)
     tlsf_stats_t stats;
     assert(tlsf_get_stats(&t, &stats) == 0);
     assert(stats.free_count == 1);
-    assert(stats.largest_free > TLSF_TEST_ALLOC_BOUND);
-    assert(stats.largest_free < ceiling);
+
+    /* free_count is 1, so total_free is that block. largest_free is clamped
+     * and cannot show that it exceeds any single allocation.
+     */
+    assert(stats.total_free > TLSF_MAX_SIZE);
+    assert(stats.total_free < ceiling);
+    assert(stats.largest_free <= TLSF_MAX_SIZE);
 
     tlsf_check(&t);
 
+    /* Reset rebuilds the same oversized free block after an append. */
+    tlsf_pool_reset(&t);
+    assert(tlsf_get_stats(&t, &stats) == 0);
+    assert_largest_free_allocatable(&t, stats.largest_free);
+
     free(mem);
-    printf("%zu-byte free block above the %zu-byte allocation bound, done\n",
-           stats.largest_free, (size_t) TLSF_TEST_ALLOC_BOUND);
+    printf("%zu-byte allocatable block after append/reset, done\n",
+           stats.largest_free);
+}
+
+/* Statistics must leave room for the allocator's second-level rounding. */
+static void largest_free_rounding_test(void)
+{
+    printf("Largest-free rounding test: ");
+    fflush(stdout);
+
+    /* The pool must already be ALIGN_SIZE-aligned. pool_init() would
+     * otherwise skip up to ALIGN_SIZE-1 bytes to align it and the expected
+     * figure below would move. A size_t array gives exactly that alignment;
+     * max_align_t would too, but MSVC does not declare it in C mode. 1056 is
+     * a multiple of sizeof(size_t) at both widths, so the span is exact.
+     */
+    size_t pool[1056 / sizeof(size_t)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+    tlsf_stats_t stats;
+    assert(tlsf_get_stats(&t, &stats) == 0);
+    assert(stats.largest_free == 1024);
+    assert_largest_free_allocatable(&t, stats.largest_free);
+
+    puts("done");
 }
 
 /* A freed block must land in the bin that a same-size request will search, so
@@ -1675,6 +1722,7 @@ int main(void)
     pool_ceiling_test();
     oversized_free_block_test();
     coalesced_free_block_test(&t);
+    largest_free_rounding_test();
 
     /* Run argument contract test */
     argument_contract_test();

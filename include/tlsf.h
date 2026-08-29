@@ -482,7 +482,7 @@ static inline void tlsf_check(tlsf_t *t)
  */
 typedef struct {
     size_t total_free;   /* Total free bytes available */
-    size_t largest_free; /* Largest contiguous free block */
+    size_t largest_free; /* Largest contiguous allocation that can succeed */
     size_t total_used;   /* Total bytes in allocated blocks */
     size_t block_count;  /* Total number of blocks (free + used) */
     size_t free_count;   /* Number of free blocks (fragmentation indicator) */

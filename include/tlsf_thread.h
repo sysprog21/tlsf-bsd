@@ -461,8 +461,8 @@ void tlsf_thread_check(tlsf_thread_t *ts);
 
 /**
  * Aggregate statistics across all arenas. largest_free reports the single
- * largest free block in any one arena, which is the largest allocation that can
- * still succeed, not the sum of free space.
+ * largest allocation that can succeed in any one arena, not the sum of free
+ * space.
  *
  * Not an atomic snapshot: arena locks are taken one at a time, so concurrent
  * allocations in an already-visited arena are not reflected. Quiesce the other

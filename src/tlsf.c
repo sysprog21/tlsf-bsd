@@ -754,6 +754,10 @@ INLINE size_t adjust_size(size_t size, size_t align)
  * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
  * large sizes, it rounds up to the next second-level bin boundary.
  */
+/* Round up to the next block size. Branch-free: for small sizes (<
+ * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
+ * large sizes, it rounds up to the next second-level bin boundary.
+ */
 /*@
   requires size > 0;
   requires size <= TLSF_MAX_SIZE;
@@ -774,6 +778,22 @@ INLINE size_t round_block_size(size_t size)
     /* Large: (1 << shift) - 1 = SL rounding mask.  Small: 0 - 0 = 0. */
     size_t t = round - is_large;
     return (size + t) & ~t;
+}
+
+/* The inverse direction: the largest request this block size can serve, since
+ * a request is rounded up and must still fit. Takes any mappable block size,
+ * including one above TLSF_MAX_SIZE, which coalescing and pool appends do
+ * build; capping belongs to the caller and cannot be done first without
+ * under-reporting.
+ */
+INLINE size_t floor_block_size(size_t size)
+{
+    uint32_t lg = log2floor(size);
+    size_t is_large = (size_t) (lg >= (uint32_t) FL_SHIFT);
+    uint32_t shift =
+        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
+    size_t round = is_large << shift;
+    return size & ~(round - is_large);
 }
 
 /* Map size to first-level (fl) and second-level (sl) bin indices. Branch-free:
@@ -1940,6 +1960,7 @@ void tlsf_check(tlsf_t *t)
  * - overhead: Metadata bytes (block headers + sentinel)
  * - block_count: Total blocks including used and free
  * - free_count: Number of free blocks (fragmentation indicator)
+ * - largest_free: Largest single allocation the allocator can serve
  */
 int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
 {
@@ -1972,10 +1993,17 @@ int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
         stats->overhead += BLOCK_OVERHEAD;
 
         if (block_is_free(block)) {
+            /* Floor first, then cap. Capping first would floor the cap and
+             * report less than tlsf_malloc() will actually serve.
+             */
+            size_t floored = floor_block_size(bsize);
+            size_t alloc_size =
+                floored > TLSF_MAX_SIZE ? TLSF_MAX_SIZE : floored;
+
             stats->free_count++;
             stats->total_free += bsize;
-            if (bsize > stats->largest_free)
-                stats->largest_free = bsize;
+            if (alloc_size > stats->largest_free)
+                stats->largest_free = alloc_size;
         } else {
             stats->total_used += bsize;
         }

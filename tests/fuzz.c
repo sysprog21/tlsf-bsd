@@ -15,10 +15,10 @@
  *
  * The payload of every live block carries a tag, verified before the block is
  * handed back. That catches the failure this allocator would otherwise hide,
- * two live allocations overlapping, which no heap invariant can see because
- * the metadata stays perfectly consistent. The tag is derived from the slot
- * index, so no two blocks that are live at the same moment can carry the same
- * one, which is the property the check rests on.
+ * two live allocations overlapping, which no heap invariant can see because the
+ * metadata stays perfectly consistent. The tag is derived from the slot index,
+ * so no two blocks that are live at the same moment can carry the same one,
+ * which is the property the check rests on.
  *
  * Two entry points, one body. Built with -fsanitize=fuzzer the file provides
  * LLVMFuzzerTestOneInput and libFuzzer drives it; built any other way it gets a
@@ -207,8 +207,8 @@ int main(void)
     uint32_t state = used;
 
     /* Before the rounds, not after. An assertion inside the target aborts the
-     * process, and a seed printed at the end is a seed printed only when it
-     * was not needed.
+     * process, and a seed printed at the end is a seed printed only when it was
+     * not needed.
      */
     printf("Fuzz target replay: seed 0x%08x (set TLSF_FUZZ_SEED), ", used);
     fflush(stdout);
