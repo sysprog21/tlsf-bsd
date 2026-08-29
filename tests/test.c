@@ -223,26 +223,53 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         assert(p[i]);
         rest -= (int64_t) len;
 
+        /* Tag the whole usable extent, not just one byte, and do it before the
+         * realloc below rather than after: a fill that ran afterwards could not
+         * observe a copy that moved the wrong number of bytes. The fill spans
+         * the usable size rather than the request, so it doubles as the check
+         * on tlsf_usable_size(): under-reporting trips the assert,
+         * over-reporting corrupts a neighbour that tlsf_check() sees.
+         */
+        uint8_t *data = (uint8_t *) p[i];
+        uint8_t tag = (uint8_t) i;
+        size_t usable = tlsf_usable_size(data);
+        assert(usable >= len);
+        memset(data, tag, usable);
+
         if (TEST_RAND() % 10 == 0) {
+            size_t old_len = len;
             len = ((size_t) TEST_RAND() % cap) + 1;
             p[i] = tlsf_realloc(t, p[i], len);
             assert(p[i]);
+            data = (uint8_t *) p[i];
+            usable = tlsf_usable_size(data);
+            assert(usable >= len);
+
+            /* Only the smaller of the two requests is promised to survive, so
+             * that is what gets checked. This allocator carries the whole block
+             * across, having no record of the request to copy less by, but
+             * pinning that would fail a realloc that legitimately copied only
+             * what it owes. Nothing is lost by asking for less: a half-length
+             * and a one-word-short copy are both caught on 20 of 20 runs either
+             * way, because a request often lands within an alignment unit of
+             * the block it got.
+             *
+             * Comparing the run against itself shifted by one byte is the cheap
+             * way to assert every byte holds 'tag': it reaches libc's
+             * vectorised memcmp, where a per-byte loop with an assert in it
+             * cannot be vectorised and tripled the suite's runtime.
+             */
+            size_t keep = old_len < len ? old_len : len;
+            assert(data[0] == tag && !memcmp(data, data + 1, keep - 1));
+
+            /* Growth exposes bytes realloc never wrote. Tag them so the
+             * free-time sweep can cover the whole extent.
+             */
+            memset(data + keep, tag, usable - keep);
         }
 
         if (i % check_stride == 0)
             tlsf_check(t);
-
-        /* Fill with magic (only when testing up to 1MB). The fill runs over the
-         * usable size rather than the requested length, so it doubles as the
-         * check on tlsf_usable_size(): under-reporting trips the assert, and
-         * over-reporting corrupts a neighbour that tlsf_check() then sees.
-         */
-        uint8_t *data = (uint8_t *) p[i];
-        size_t usable = tlsf_usable_size(data);
-        assert(usable >= len);
-        if (spacelen <= 1024 * 1024)
-            memset(data, 0, usable);
-        data[0] = 0xa5;
 
         i++;
     }
@@ -263,8 +290,15 @@ static void random_test(tlsf_t *t, size_t spacelen, const size_t cap)
         if (p[target] == NULL)
             continue;
 
+        /* Sweep the whole extent, which reaches the successor's 'prev' field:
+         * that word overlays the last payload word of a used block, and only an
+         * operation on this very block may write it. A block_link_next() added
+         * to block_rtrim_used(), say, would break that and trip here.
+         */
         uint8_t *data = (uint8_t *) p[target];
-        assert(data[0] == 0xa5);
+        uint8_t tag = (uint8_t) target;
+        size_t usable = tlsf_usable_size(data);
+        assert(data[0] == tag && !memcmp(data, data + 1, usable - 1));
         tlsf_free(t, p[target]);
         p[target] = NULL;
         n--;
