@@ -754,10 +754,24 @@ INLINE size_t adjust_size(size_t size, size_t align)
  * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
  * large sizes, it rounds up to the next second-level bin boundary.
  */
-/* Round up to the next block size. Branch-free: for small sizes (<
- * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
- * large sizes, it rounds up to the next second-level bin boundary.
+/* Second-level bin mask: all-zero below BLOCK_SIZE_SMALL, where bins are
+ * linear, and (1 << shift) - 1 above it. Both rounding directions need it, so
+ * it lives here rather than twice.
+ *
+ * The shift clamp is load-bearing, not defensive: an aligned size still only
+ * gives lg >= ALIGN_SHIFT, so lg - SL_SHIFT wraps for the smallest sizes and
+ * would be undefined without it. The wrapped value is harmless because
+ * is_large is zero there and zero shifted by anything is zero.
  */
+INLINE size_t block_size_mask(size_t size)
+{
+    uint32_t lg = log2floor(size);
+    size_t is_large = (size_t) (lg >= (uint32_t) FL_SHIFT);
+    uint32_t shift =
+        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
+    return (is_large << shift) - is_large;
+}
+
 /*@
   requires size > 0;
   requires size <= TLSF_MAX_SIZE;
@@ -766,17 +780,7 @@ INLINE size_t adjust_size(size_t size, size_t align)
 */
 INLINE size_t round_block_size(size_t size)
 {
-    uint32_t lg = log2floor(size);
-    size_t is_large = (size_t) (lg >= (uint32_t) FL_SHIFT);
-
-    /* Clamp shift to valid range; garbage value is harmless when is_large=0
-     * because shifting zero by any valid amount yields zero.
-     */
-    uint32_t shift =
-        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
-    size_t round = is_large << shift;
-    /* Large: (1 << shift) - 1 = SL rounding mask.  Small: 0 - 0 = 0. */
-    size_t t = round - is_large;
+    size_t t = block_size_mask(size);
     return (size + t) & ~t;
 }
 
@@ -788,12 +792,7 @@ INLINE size_t round_block_size(size_t size)
  */
 INLINE size_t floor_block_size(size_t size)
 {
-    uint32_t lg = log2floor(size);
-    size_t is_large = (size_t) (lg >= (uint32_t) FL_SHIFT);
-    uint32_t shift =
-        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
-    size_t round = is_large << shift;
-    return size & ~(round - is_large);
+    return size & ~block_size_mask(size);
 }
 
 /* Map size to first-level (fl) and second-level (sl) bin indices. Branch-free:
