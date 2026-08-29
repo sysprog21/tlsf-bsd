@@ -21,9 +21,8 @@ static TLSF_THREAD_LOCAL unsigned int tlsf_thread_id = 0;
 
 static inline unsigned int get_thread_hint(void)
 {
-#if defined(TLSF_THREAD_SHIFTXOR)
-    uintptr_t thread_unique_address = (uintptr_t) (&tlsf_thread_id);
-    return TLSF_THREAD_SHIFTXOR(thread_unique_address);
+#if defined(TLSF_THREAD_LOCAL)
+    return (unsigned) ((uintptr_t) &tlsf_thread_id);
 #elif defined(TLSF_THREAD_HINT)
     return TLSF_THREAD_HINT();
 #else

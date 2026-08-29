@@ -221,11 +221,6 @@
 #endif
 #endif
 
-#ifdef TLSF_THREAD_LOCAL
-#define TLSF_THREAD_SHIFTXOR(x) \
-    ((unsigned) ((uintptr_t) x ^ ((uintptr_t) x >> 16)))
-#endif
-
 /* Number of independent arenas. Each arena has its own lock and TLSF pool, so N
  * arenas support up to N contention-free concurrent allocations.
  *
