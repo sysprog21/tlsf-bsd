@@ -215,12 +215,12 @@
     !defined(__cplusplus)
 #define TLSF_MSVC_ALIGN(x)
 #define TLSF_GCC_ALIGN(x)
-#define TLSF_C11C23_ALIGN(x) _Alignas(x)
+#define TLSF_C11C23_ALIGN(x) alignas(x)
 #elif (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L) && \
     !defined(__cplusplus)
 #define TLSF_MSVC_ALIGN(x)
 #define TLSF_GCC_ALIGN(x)
-#define TLSF_C11C23_ALIGN(x) alignas(x)
+#define TLSF_C11C23_ALIGN(x) _Alignas(x)
 #else
 #define TLSF_MSVC_ALIGN(x)
 #define TLSF_GCC_ALIGN(x)
