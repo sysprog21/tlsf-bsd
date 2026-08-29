@@ -536,7 +536,12 @@ INLINE char *block_payload(tlsf_block_t *block)
 INLINE tlsf_block_t *to_block(void *ptr)
 {
     tlsf_block_t *block = (tlsf_block_t *) ptr;
-    ASSERT(block_payload(block) == align_ptr(block_payload(block), ALIGN_SIZE),
+    /* align_offset(), not align_ptr(): this only tests alignment, and
+     * align_ptr() would additionally require the caller to own a full
+     * alignment window that to_block() cannot promise. The two are
+     * equivalent here, since align_ptr(p, a) is p + align_offset(p, a).
+     */
+    ASSERT(align_offset(block_payload(block), ALIGN_SIZE) == 0,
            "block not aligned properly");
     return block;
 }
