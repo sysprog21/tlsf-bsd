@@ -609,8 +609,13 @@ INLINE tlsf_block_t *block_next(tlsf_block_t *block)
     return next;
 }
 
+/* Only 'prev' is written, so only 'prev' need be addressable. Requiring the
+ * whole block would oblige every caller to establish more than this needs,
+ * which is what blocks block_link_next(): block_next()'s span predicate stops
+ * one header short of a full tlsf_block_t.
+ */
 /*@
-  requires \valid(next);
+  requires \valid(&next->prev);
   assigns next->prev \from block;
   ensures next->prev == block;
 */
