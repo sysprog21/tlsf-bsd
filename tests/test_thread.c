@@ -490,8 +490,8 @@ static void init_limits_test(void)
      * and init unwinds.
      */
     TLSF_MSVC_ALIGN(16)
-    TLSF_C11C23_ALIGN(
-        16) static char cramped[TLSF_TEST_BLOCK_COST] TLSF_GCC_ALIGN(16);
+    TLSF_C11C23_ALIGN(16)
+    static char cramped[TLSF_TEST_BLOCK_COST] TLSF_GCC_ALIGN(16);
     assert(tlsf_thread_init(&small, cramped, sizeof(cramped)) == 0);
     assert(small.count == 0);
 
