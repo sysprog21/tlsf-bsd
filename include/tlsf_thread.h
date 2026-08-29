@@ -11,12 +11,14 @@
  *
  * Instead of a single coarse mutex around the entire allocator, the pool is
  * split into TLSF_ARENA_COUNT independent sub-pools (arenas), each with its own
- * lock. An allocation prefers the arena at mix(TLSF_THREAD_HINT()) modulo the
- * live arena count, so allocations from different threads usually hit different
- * locks. Nothing guarantees distinct arenas: hints can collide, and an arena
- * that is locked or full is skipped for another. Where TLSF_THREAD_HINT()
- * cannot identify a thread it is the constant 0, which funnels every thread to
- * arena 0 and forfeits the whole benefit; see the lock abstraction below.
+ * lock. An allocation prefers the arena at mix(thread local variable address or
+ * optional by user TLSF_THREAD_HINT()) modulo the live arena count, so
+ * allocations from different threads usually hit different locks. Nothing
+ * guarantees distinct arenas: hints can collide, and an arena that is locked or
+ * full is skipped for another. Where thread local varibales is not available or
+ * TLSF_THREAD_HINT() is not identified a thread it is the constant 0, which
+ * funnels every thread to arena 0 and forfeits the whole benefit; see the lock
+ * abstraction below.
  *
  * Thread-safety contract (same as POSIX malloc/free):
  * - Different threads may call any API function concurrently.
@@ -43,11 +45,7 @@
 
 /* Lock abstraction
  *
- * Override ALL six lock macros together before including this header. When
- * providing custom locks, also define TLSF_THREAD_HINT() to return a
- * thread-specific unsigned integer for arena selection. Without it the hint
- * falls back to the constant 0, every thread selects arena 0, and the per-arena
- * locking degenerates to a single lock.
+ * Override ALL six lock macros together before including this header.
  *
  * TLSF_LOCK_INIT must evaluate to an int: 0 on success, non-zero on failure.
  * tlsf_thread_init() checks it and aborts initialization if a lock cannot be
@@ -61,7 +59,6 @@
  *   #define TLSF_LOCK_ACQUIRE(l)  xSemaphoreTake(*(l), portMAX_DELAY)
  *   #define TLSF_LOCK_RELEASE(l)  xSemaphoreGive(*(l))
  *   #define TLSF_LOCK_TRY(l)      (xSemaphoreTake(*(l),0)==pdTRUE)
- *   #define TLSF_THREAD_HINT()    ((unsigned)uxTaskGetTaskNumber(NULL))
  *   #include "tlsf_thread.h"
  */
 
@@ -196,42 +193,7 @@
 #define TLSF_LOCK_TRY(l) (pthread_mutex_trylock((l)) == 0)
 #endif
 
-/* Fold upper bits into lower 32 to retain entropy on 64-bit systems. */
-#ifndef TLSF_THREAD_HINT
-#if defined(_TLSF_USE_C11_THREADS)
-#if defined(TLSF_THREAD_WIN)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#define TLSF_THREAD_HINT() ((unsigned) GetCurrentThreadId())
-#elif defined(TLSF_THREAD_POSIX)
-#include <pthread.h>
-#define TLSF_THREAD_HINT()                    \
-    ((unsigned) ((uintptr_t) pthread_self() ^ \
-                 ((uintptr_t) pthread_self() >> 16)))
-#else
-#define TLSF_THREAD_HINT()                    \
-    ((unsigned) ((uintptr_t) thrd_current() ^ \
-                 ((uintptr_t) thrd_current() >> 16)))
-#endif
-#elif defined(TLSF_THREAD_POSIX)
-#define TLSF_THREAD_HINT()                    \
-    ((unsigned) ((uintptr_t) pthread_self() ^ \
-                 ((uintptr_t) pthread_self() >> 16)))
-#elif defined(TLSF_THREAD_WIN)
-#define TLSF_THREAD_HINT() ((unsigned) GetCurrentThreadId())
-#else
-#define TLSF_THREAD_HINT() 0U
-#endif
-#endif
-
 #endif /* TLSF_LOCK_T */
-
-/* Fallback thread hint for custom locks without a custom hint. */
-#ifndef TLSF_THREAD_HINT
-#define TLSF_THREAD_HINT() 0U
-#endif
 
 #if defined(_MSC_VER)
 #define TLSF_MSVC_ALIGN(x) __declspec(align(x))
@@ -242,6 +204,23 @@
 #else
 #define TLSF_MSVC_ALIGN(x)
 #define TLSF_GCC_ALIGN(x)
+#endif
+
+/* Define here optional TLSF_THREAD_HINT()
+ * if thread local storage is not available.
+ */
+#if !defined(TLSF_THREAD_HINT)
+#if defined(_MSC_VER) && _MSC_VER < 1938
+#define TLSF_THREAD_LOCAL __declspec(thread)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define TLSF_THREAD_LOCAL thread_local
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define TLSF_THREAD_LOCAL _Thread_local
+#elif defined(__GNUC__) || defined(__clang__)
+#define TLSF_THREAD_LOCAL __thread
+#elif defined(_MSC_VER)
+#define TLSF_THREAD_LOCAL __declspec(thread)
+#endif
 #endif
 
 /* Number of independent arenas. Each arena has its own lock and TLSF pool, so N

@@ -14,6 +14,22 @@
 
 #include "tlsf_thread.h"
 
+/* Local for each thread id */
+#if defined(TLSF_THREAD_LOCAL) && !defined(TLSF_THREAD_HINT)
+static TLSF_THREAD_LOCAL unsigned int tlsf_thread_id = 0;
+#endif
+
+static inline unsigned int get_thread_hint(void)
+{
+#if defined(TLSF_THREAD_LOCAL)
+    return (unsigned) ((uintptr_t) &tlsf_thread_id);
+#elif defined(TLSF_THREAD_HINT)
+    return TLSF_THREAD_HINT();
+#else
+    return 0U;
+#endif
+}
+
 /* Hash the thread hint to select a preferred arena.
  *
  * The mixing function distributes thread IDs that may differ only in their low
@@ -21,7 +37,7 @@
  */
 static inline int arena_select(const tlsf_thread_t *ts)
 {
-    unsigned h = TLSF_THREAD_HINT();
+    unsigned h = get_thread_hint();
     h ^= h >> 16;
     h *= 0x45d9f3bU;
     h ^= h >> 16;
