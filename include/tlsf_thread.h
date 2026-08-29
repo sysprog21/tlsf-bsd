@@ -195,15 +195,7 @@
 
 #endif /* TLSF_LOCK_T */
 
-/* Define here TLSF_NO_COMPATIBLE_ALIGN
- * if compiler is GCC/Clang or some other with randomize layout
- * but randomize_layout and strict mode are set on simultaneously.
- */
-#if defined(TLSF_NO_COMPATIBLE_ALIGN)
-#define TLSF_MSVC_ALIGN(x)
-#define TLSF_GCC_ALIGN(x)
-#define TLSF_C11C23_ALIGN(x)
-#elif defined(_MSC_VER)
+#if defined(_MSC_VER)
 #define TLSF_MSVC_ALIGN(x) __declspec(align(x))
 #define TLSF_GCC_ALIGN(x)
 #define TLSF_C11C23_ALIGN(x)
