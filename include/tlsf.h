@@ -390,6 +390,15 @@ void tlsf_pool_reset(tlsf_t *t);
  *
  * Return Pointer to at least @size bytes, aligned to ALIGN_SIZE (8 on 64-bit, 4
  * on 32-bit), or NULL on failure.
+ *
+ * ALIGN_SIZE is pinned to sizeof(size_t): the one-word header makes
+ * BLOCK_OVERHEAD sizeof(size_t), and both it and BLOCK_SIZE_MIN must be
+ * multiples of the alignment. Raising it costs a wider header on every
+ * allocation.
+ *
+ * On 32-bit the resulting 4 bytes is under _Alignof(max_align_t), 16 on i386,
+ * so this is not a conforming malloc() substitute there for over-aligned
+ * types. Use tlsf_aalloc(), which takes the alignment explicitly.
  */
 /*@
   requires \valid(t);
