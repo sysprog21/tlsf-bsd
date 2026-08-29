@@ -40,7 +40,8 @@
 #define MAX_ALLOCS 128
 #define MAX_ALLOC_SIZE 2048
 
-TLSF_MSVC_ALIGN(16) static char pool[POOL_SIZE] TLSF_GCC_ALIGN(16);
+TLSF_MSVC_ALIGN(16)
+TLSF_C11C23_ALIGN(16) static char pool[POOL_SIZE] TLSF_GCC_ALIGN(16);
 static tlsf_thread_t ts;
 
 #if defined(_TLSF_USE_C11_THREADS)
@@ -489,7 +490,8 @@ static void init_limits_test(void)
      * and init unwinds.
      */
     TLSF_MSVC_ALIGN(16)
-    static char cramped[TLSF_TEST_BLOCK_COST] TLSF_GCC_ALIGN(16);
+    TLSF_C11C23_ALIGN(
+        16) static char cramped[TLSF_TEST_BLOCK_COST] TLSF_GCC_ALIGN(16);
     assert(tlsf_thread_init(&small, cramped, sizeof(cramped)) == 0);
     assert(small.count == 0);
 
@@ -504,7 +506,8 @@ static void init_limits_test(void)
      * per-arena minimum that tlsf_thread_init() enforces, so the count has to
      * halve at least once.
      */
-    TLSF_MSVC_ALIGN(16) static char narrow[2 * 256] TLSF_GCC_ALIGN(16);
+    TLSF_MSVC_ALIGN(16)
+    TLSF_C11C23_ALIGN(16) static char narrow[2 * 256] TLSF_GCC_ALIGN(16);
     size_t usable = tlsf_thread_init(&small, narrow, sizeof(narrow));
     assert(usable > 0);
     assert(small.count >= 1);
