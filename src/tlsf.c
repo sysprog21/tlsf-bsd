@@ -763,6 +763,11 @@ INLINE size_t adjust_size(size_t size, size_t align)
  * would be undefined without it. The wrapped value is harmless because
  * is_large is zero there and zero shifted by anything is zero.
  */
+/*@
+  requires size > 0;
+  requires size < ((size_t) 1 << FL_MAX);
+  assigns \nothing;
+*/
 INLINE size_t block_size_mask(size_t size)
 {
     uint32_t lg = log2floor(size);
@@ -789,7 +794,17 @@ INLINE size_t round_block_size(size_t size)
  * including one above TLSF_MAX_SIZE, which coalescing and pool appends do
  * build; capping belongs to the caller and cannot be done first without
  * under-reporting.
+ *
+ * No postcondition, so WP proves only the absence of runtime errors here.
+ * Alt-Ergo timed out at 240s on each of '\result <= size', '\result > 0' and
+ * '\result % ALIGN_SIZE == 0'; bit reasoning over a computed shift is beyond
+ * it. round_block_size() is unannotated for the same reason.
  */
+/*@
+  requires size > 0;
+  requires size < ((size_t) 1 << FL_MAX);
+  assigns \nothing;
+*/
 INLINE size_t floor_block_size(size_t size)
 {
     return size & ~block_size_mask(size);
