@@ -35,7 +35,8 @@ TARGETS = \
 	test \
 	bench \
 	wcet \
-	fuzz
+	fuzz \
+	check_negative
 TARGETS := $(addprefix $(OUT)/,$(TARGETS))
 
 THREAD_TARGETS = $(OUT)/test_thread
@@ -91,7 +92,7 @@ THREAD_OBJS = $(OUT)/tlsf_thread.o
 # Every rule that passes -MMD -MF must be listed, or 'clean' leaves its dep
 # file behind. $(OUT)/test is deliberately absent: its rule emits no dep file.
 deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
-	$(OUT)/bench.d $(OUT)/wcet.d $(OUT)/fuzz.d \
+	$(OUT)/bench.d $(OUT)/wcet.d $(OUT)/fuzz.d $(OUT)/check_negative.d \
 	$(THREAD_TARGETS:%=%.d) $(CPP_TARGETS:%=%.d)
 
 # Make compares timestamps, not command lines, so flipping a variable on the
@@ -140,6 +141,11 @@ $(OUT)/fuzz: $(OBJS) tests/fuzz.c $(FLAGS_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Itests -o $@ -MMD -MF $@.d $(OBJS) \
 		tests/fuzz.c $(LDFLAGS)
 
+# Deliberate heap corruption, one case per process. See the file header.
+$(OUT)/check_negative: $(OBJS) tests/check_negative.c $(FLAGS_STAMP)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Itests -o $@ -MMD -MF $@.d $(OBJS) \
+		tests/check_negative.c $(LDFLAGS)
+
 # Thread-safe module (requires pthreads)
 $(OUT)/tlsf_thread.o: src/tlsf_thread.c include/tlsf_thread.h $(FLAGS_STAMP)
 	@mkdir -p $(OUT)
@@ -158,7 +164,7 @@ $(OUT)/%.o: src/%.c $(FLAGS_STAMP)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
 
-check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
+check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS) check-negative
 	MALLOC_CHECK_=3 ./build/test
 	MALLOC_CHECK_=3 ./build/bench -l 10000 -i 3 -w 1
 	MALLOC_CHECK_=3 ./build/bench -s 32 -l 10000 -i 3 -w 1
@@ -167,6 +173,39 @@ check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
 	MALLOC_CHECK_=3 ./build/fuzz
 	./build/test_thread
 	./build/test_cpp
+
+# Each case must abort with a CHECK diagnostic, not a segfault that looks like
+# one. Two ways this fails open, both closed here: a fixture broken in seed()
+# would abort every case alike, so the control run goes first; a build without
+# TLSF_ENABLE_CHECK has no rejection to observe, so the driver reports zero
+# cases and this skips. The count arrives as an exit status, so a driver that
+# dies at startup yields a number past the last case, which the driver itself
+# then rejects. Cores are off because the aborts are expected.
+check-negative: $(OUT)/check_negative
+	@ulimit -c 0; \
+	./$(OUT)/check_negative; n=$$?; \
+	if [ "$$n" -eq 0 ]; then \
+		echo "check_negative: skipped (built without TLSF_ENABLE_CHECK)"; \
+		exit 0; \
+	fi; \
+	if ! ./$(OUT)/check_negative -1 >/dev/null 2>&1; then \
+		echo "check_negative: control case failed; harness is broken" >&2; \
+		exit 1; \
+	fi; \
+	i=0; \
+	while [ "$$i" -lt "$$n" ]; do \
+		if out=$$(./$(OUT)/check_negative $$i 2>&1); then \
+			echo "check_negative: case $$i accepted by tlsf_check()" >&2; \
+			exit 1; \
+		fi; \
+		case "$$out" in \
+		*"TLSF CHECK:"*) ;; \
+		*) echo "check_negative: case $$i failed with no CHECK diagnostic:" \
+			>&2; echo "$$out" >&2; exit 1 ;; \
+		esac; \
+		i=$$((i + 1)); \
+	done; \
+	echo "check_negative: $$n corruptions, each rejected by tlsf_check()"
 
 # RTE guards are emitted as ACSL asserts, so filtering out @assert would discard
 # every runtime-error obligation that -wp-rte just generated. Keep them counted.
@@ -235,7 +274,7 @@ clean:
 	$(RM) $(OUT)/*.gcda $(OUT)/*.gcno *.gcov
 	$(RM) -r $(OUT)/*.dSYM
 
-.PHONY: all check clean verify bench bench-quick fuzz wcet wcet-quick \
-	wcet-plot FORCE
+.PHONY: all check check-negative clean verify bench bench-quick fuzz wcet \
+	wcet-quick wcet-plot FORCE
 
 -include $(deps)
