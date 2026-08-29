@@ -15,7 +15,7 @@
  * optional by user TLSF_THREAD_HINT()) modulo the live arena count, so
  * allocations from different threads usually hit different locks. Nothing
  * guarantees distinct arenas: hints can collide, and an arena that is locked or
- * full is skipped for another. Where thread local varibales øû not available or
+ * full is skipped for another. Where thread local varibales is not available or
  * TLSF_THREAD_HINT() is not identified a thread it is the constant 0, which
  * funnels every thread to arena 0 and forfeits the whole benefit; see the lock
  * abstraction below.
@@ -210,7 +210,9 @@
  * if thread local storage is not available.
  */
 #if !defined(TLSF_THREAD_HINT)
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#if defined(_MSC_VER) && _MSC_VER < 1938
+#define TLSF_THREAD_LOCAL __declspec(thread)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #define TLSF_THREAD_LOCAL thread_local
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define TLSF_THREAD_LOCAL _Thread_local
