@@ -170,6 +170,40 @@ static inline tick_t read_tick(void)
 }
 #endif
 
+/* Smallest non-zero step the counter reports, measured rather than assumed:
+ * on Apple Silicon read_tick() returns nanoseconds off a 24 MHz counter, so
+ * its real step is 42 ns while a malloc costs tens. Samples then collapse onto
+ * multiples of the step and every derived figure describes the clock. Knowing
+ * the step is what lets the report say so. Returns 0 if the counter is
+ * stopped.
+ */
+static tick_t tick_resolution(void)
+{
+    tick_t best = 0;
+
+    /* 64 trials: a minimum converges fast, and each trial spins for one tick
+     * period on a coarse counter, so the count is what makes this expensive.
+     */
+    for (int trial = 0; trial < 64; trial++) {
+        tick_t a = read_tick(), b = a;
+
+        /* Bounded, so a stopped counter ends the loop instead of hanging. */
+        for (int spin = 0; spin < 1000000 && b == a; spin++)
+            b = read_tick();
+        if (b == a)
+            return 0;
+
+        /* A read on another core can come back behind the first, making the
+         * unsigned difference near UINT64_MAX. Drop the trial: on the first
+         * one it would otherwise be taken outright, 'best' still being zero.
+         */
+        if (b > a && (!best || b - a < best))
+            best = b - a;
+    }
+
+    return best;
+}
+
 /* Statistics */
 
 static int cmp_tick(const void *a, const void *b)
@@ -655,15 +689,34 @@ int main(int argc, char **argv)
         fprintf(raw_fp, "scenario,size,unit,value\n");
     }
 
-    /* Header */
+    const tick_t resolution = tick_resolution();
+    bool zero_sample = false;
+
+    /* Header. The timer step belongs with the numbers in either mode, but CSV
+     * carries data rows only, so there it goes to stderr rather than into the
+     * columns.
+     */
+    if (!csv_mode) {
+        printf("TLSF WCET Analysis\n");
+        printf("==================\n");
+    }
+
+    /* CSV carries data rows only, so the step goes to stderr there rather than
+     * into the columns.
+     */
+    FILE *hdr = csv_mode ? stderr : stdout;
+    if (resolution)
+        fprintf(hdr, "Timer:      %s (step %" PRIu64 " %s, measured)\n",
+                TICK_UNIT, resolution, TICK_UNIT);
+    else
+        fprintf(hdr, "Timer:      %s (step unknown: counter did not advance)\n",
+                TICK_UNIT);
+
     if (csv_mode) {
         printf(
             "scenario,size,samples,unit,min,p50,p90,p99,p999,max,mean,"
             "stddev\n");
     } else {
-        printf("TLSF WCET Analysis\n");
-        printf("==================\n");
-        printf("Timer:      %s\n", TICK_UNIT);
         printf("Cache:      %s\n", thrash_buf ? "cold (64 MB thrash)" : "hot");
         printf("Pool:       %zu bytes (%.1f MB)\n", pool_size,
                (double) pool_size / (1024.0 * 1024.0));
@@ -700,6 +753,7 @@ int main(int argc, char **argv)
 
             latency_stats_t st;
             compute_latency_stats(samples, iterations, &st);
+            zero_sample |= st.min == 0;
 
             if (csv_mode) {
                 printf("%s,%zu,%zu,%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64
@@ -755,6 +809,23 @@ int main(int argc, char **argv)
             printf("  %6zu %9.2fx %9.2fx\n", sz, malloc_ratio, free_ratio);
         }
         printf("\n");
+    }
+
+    /* A zero sample means the operation finished inside one step, so the
+     * counter cannot see it and the percentiles and ratios above are the
+     * counter's shape rather than the allocator's.
+     *
+     * The test is on the fastest sample, not the median, and needs no tuning
+     * constant.
+     */
+    if (resolution && zero_sample) {
+        fprintf(csv_mode ? stderr : stdout,
+                "WARNING: timer step %" PRIu64
+                " %s, and the fastest sample took zero.\n"
+                "         Operations complete inside one step, so the "
+                "percentiles and ratios\n"
+                "         above measure the clock, not the allocator.\n\n",
+                resolution, TICK_UNIT);
     }
 
     if (raw_fp)

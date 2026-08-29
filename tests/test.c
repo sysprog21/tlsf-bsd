@@ -1270,6 +1270,91 @@ static void small_bin_trim_test(void)
            seeded, got);
 }
 
+/* block_can_trim()'s bound is inclusive: a block exactly large enough to leave
+ * BLOCK_OVERHEAD + TLSF_SPLIT_THRESHOLD behind must still split. Making it
+ * exclusive wastes a few bytes per allocation, which no throughput figure or
+ * consistency check notices, and the suite passed with it. The block here is
+ * that exact size, so an off-by-one either way changes the outcome.
+ */
+static void trim_boundary_test(void)
+{
+    printf("Trim boundary test: ");
+    fflush(stdout);
+
+    /* Both sizes must sit in the FL=0 linear range, where rounding is the
+     * identity; above it the block built is not the one reasoned about here.
+     */
+    const size_t fast_path_max = (size_t) 1 << _TLSF_FL_SHIFT;
+    const size_t remainder = sizeof(size_t) + TLSF_TEST_SPLIT_THRESHOLD;
+    const size_t req = fast_path_max / 4;
+    const size_t exact = req + remainder;
+    if (exact >= fast_path_max) {
+        printf(
+            "skipped (split threshold %zu leaves no room below the %zu-byte "
+            "FL=0 ceiling)\n",
+            (size_t) TLSF_TEST_SPLIT_THRESHOLD, fast_path_max);
+        return;
+    }
+
+    /* An unaligned split threshold is legal and the library is right under
+     * one: block sizes and adjusted requests are both alignment multiples, so
+     * their difference is too and never equals an unaligned min_total. The
+     * boundary is unreachable, not broken, so skip rather than fail.
+     */
+    if (remainder % sizeof(size_t)) {
+        printf(
+            "skipped (split threshold %zu is not alignment-sized, so the "
+            "boundary cannot be hit)\n",
+            (size_t) TLSF_TEST_SPLIT_THRESHOLD);
+        return;
+    }
+
+    static char pool[TLSF_TEST_POOL_CLAMP(64 * 1024)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+    /* Live neighbours, so freeing the donor cannot coalesce it past the
+     * boundary being measured.
+     */
+    void *lo = tlsf_malloc(&t, 64);
+    void *donor = tlsf_malloc(&t, exact);
+    void *hi = tlsf_malloc(&t, 64);
+    assert(lo && donor && hi);
+    assert(tlsf_usable_size(donor) == exact); /* else rounding moved it */
+
+    void *addr = donor;
+    tlsf_free(&t, donor);
+    tlsf_check(&t);
+
+    tlsf_stats_t before;
+    assert(tlsf_get_stats(&t, &before) == 0);
+
+    /* The donor is the smallest free block, so the search lands on it and
+     * leaves exactly the threshold. That it lands there is a fixture
+     * assumption, asserted rather than trusted: without it the checks below
+     * would pass on a block from the pool tail and prove nothing.
+     */
+    void *p = tlsf_malloc(&t, req);
+    assert(p == addr);
+    assert(tlsf_usable_size(p) == req);
+
+    /* Trimmed: donor became one used block plus one free remainder, so the
+     * count holds. Handing out the whole block would drop it.
+     */
+    tlsf_stats_t after;
+    assert(tlsf_get_stats(&t, &after) == 0);
+    assert(after.free_count == before.free_count);
+
+    tlsf_check(&t);
+    tlsf_free(&t, p);
+    tlsf_free(&t, lo);
+    tlsf_free(&t, hi);
+    tlsf_check(&t);
+
+    printf("%zu-byte block split at a %zu-byte remainder, done\n", exact,
+           remainder);
+}
+
 /* Null arguments and requests past TLSF_MAX_SIZE.
  *
  * The null rejects and the TLSF_MAX_SIZE bound are reached by nothing else in
@@ -1363,6 +1448,17 @@ static void pool_ceiling_test(void)
            align);
 }
 
+/* The claim the whole largest_free change rests on: the reported figure names
+ * a size malloc() will serve, not merely a block that exists.
+ */
+static void assert_largest_free_allocatable(tlsf_t *t, size_t largest)
+{
+    assert(largest <= TLSF_MAX_SIZE);
+    void *p = tlsf_malloc(t, largest);
+    assert(p);
+    tlsf_free(t, p);
+}
+
 /* A coalesced free block may exceed BLOCK_SIZE_MAX, which bounds a single
  * allocation. The structural cap is the arena ceiling of 2^_TLSF_FL_MAX, what
  * the mapping function can index, so a heap check that reused the allocation
@@ -1408,20 +1504,22 @@ static void coalesced_free_block_test(tlsf_t *t)
     tlsf_free(t, a);
     tlsf_free(t, b);
 
-    /* Without the merge clearing the bound this test proves nothing, so say so
-     * rather than passing quietly.
+    /* Without the merge this proves nothing. largest_free is clamped to
+     * TLSF_MAX_SIZE, hiding the merged size, so guard on 'each': only a block
+     * built from both neighbours clears a single one.
      */
     tlsf_stats_t stats;
     assert(tlsf_get_stats(t, &stats) == 0);
-    assert(stats.largest_free > bound);
+    assert(stats.largest_free > each);
+    assert_largest_free_allocatable(t, stats.largest_free);
 
     tlsf_check(t);
 
     tlsf_free(t, pin);
     tlsf_check(t);
 
-    printf("%zu-byte block from coalescing, above the %zu-byte bound, done\n",
-           stats.largest_free, bound);
+    printf("%zu-byte allocatable block from coalescing, done\n",
+           stats.largest_free);
 }
 
 /* The same defect by a second route: appending to a pool already at the
@@ -1463,14 +1561,48 @@ static void oversized_free_block_test(void)
     tlsf_stats_t stats;
     assert(tlsf_get_stats(&t, &stats) == 0);
     assert(stats.free_count == 1);
-    assert(stats.largest_free > TLSF_TEST_ALLOC_BOUND);
-    assert(stats.largest_free < ceiling);
+
+    /* free_count is 1, so total_free is that block. largest_free is clamped
+     * and cannot show that it exceeds any single allocation.
+     */
+    assert(stats.total_free > TLSF_MAX_SIZE);
+    assert(stats.total_free < ceiling);
+    assert(stats.largest_free <= TLSF_MAX_SIZE);
 
     tlsf_check(&t);
 
+    /* Reset rebuilds the same oversized free block after an append. */
+    tlsf_pool_reset(&t);
+    assert(tlsf_get_stats(&t, &stats) == 0);
+    assert_largest_free_allocatable(&t, stats.largest_free);
+
     free(mem);
-    printf("%zu-byte free block above the %zu-byte allocation bound, done\n",
-           stats.largest_free, (size_t) TLSF_TEST_ALLOC_BOUND);
+    printf("%zu-byte allocatable block after append/reset, done\n",
+           stats.largest_free);
+}
+
+/* Statistics must leave room for the allocator's second-level rounding. */
+static void largest_free_rounding_test(void)
+{
+    printf("Largest-free rounding test: ");
+    fflush(stdout);
+
+    /* The pool must already be ALIGN_SIZE-aligned. pool_init() would
+     * otherwise skip up to ALIGN_SIZE-1 bytes to align it and the expected
+     * figure below would move. A size_t array gives exactly that alignment;
+     * max_align_t would too, but MSVC does not declare it in C mode. 1056 is
+     * a multiple of sizeof(size_t) at both widths, so the span is exact.
+     */
+    size_t pool[1056 / sizeof(size_t)];
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)));
+
+    tlsf_stats_t stats;
+    assert(tlsf_get_stats(&t, &stats) == 0);
+    assert(stats.largest_free == 1024);
+    assert_largest_free_allocatable(&t, stats.largest_free);
+
+    puts("done");
 }
 
 /* A freed block must land in the bin that a same-size request will search, so
@@ -1670,11 +1802,13 @@ int main(void)
 
     /* Run small-bin trim test */
     small_bin_trim_test();
+    trim_boundary_test();
 
     /* Run pool ceiling test */
     pool_ceiling_test();
     oversized_free_block_test();
     coalesced_free_block_test(&t);
+    largest_free_rounding_test();
 
     /* Run argument contract test */
     argument_contract_test();

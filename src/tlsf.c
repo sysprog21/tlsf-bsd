@@ -536,7 +536,12 @@ INLINE char *block_payload(tlsf_block_t *block)
 INLINE tlsf_block_t *to_block(void *ptr)
 {
     tlsf_block_t *block = (tlsf_block_t *) ptr;
-    ASSERT(block_payload(block) == align_ptr(block_payload(block), ALIGN_SIZE),
+    /* align_offset(), not align_ptr(): this only tests alignment, and
+     * align_ptr() would additionally require the caller to own a full
+     * alignment window that to_block() cannot promise. The two are
+     * equivalent here, since align_ptr(p, a) is p + align_offset(p, a).
+     */
+    ASSERT(align_offset(block_payload(block), ALIGN_SIZE) == 0,
            "block not aligned properly");
     return block;
 }
@@ -609,8 +614,13 @@ INLINE tlsf_block_t *block_next(tlsf_block_t *block)
     return next;
 }
 
+/* Only 'prev' is written, so only 'prev' need be addressable. Requiring the
+ * whole block would oblige every caller to establish more than this needs,
+ * which is what blocks block_link_next(): block_next()'s span predicate stops
+ * one header short of a full tlsf_block_t.
+ */
 /*@
-  requires \valid(next);
+  requires \valid(&next->prev);
   assigns next->prev \from block;
   ensures next->prev == block;
 */
@@ -754,6 +764,29 @@ INLINE size_t adjust_size(size_t size, size_t align)
  * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
  * large sizes, it rounds up to the next second-level bin boundary.
  */
+/* Second-level bin mask: all-zero below BLOCK_SIZE_SMALL, where bins are
+ * linear, and (1 << shift) - 1 above it. Both rounding directions need it, so
+ * it lives here rather than twice.
+ *
+ * The shift clamp is load-bearing, not defensive: an aligned size still only
+ * gives lg >= ALIGN_SHIFT, so lg - SL_SHIFT wraps for the smallest sizes and
+ * would be undefined without it. The wrapped value is harmless because
+ * is_large is zero there and zero shifted by anything is zero.
+ */
+/*@
+  requires size > 0;
+  requires size < ((size_t) 1 << FL_MAX);
+  assigns \nothing;
+*/
+INLINE size_t block_size_mask(size_t size)
+{
+    uint32_t lg = log2floor(size);
+    size_t is_large = (size_t) (lg >= (uint32_t) FL_SHIFT);
+    uint32_t shift =
+        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
+    return (is_large << shift) - is_large;
+}
+
 /*@
   requires size > 0;
   requires size <= TLSF_MAX_SIZE;
@@ -762,18 +795,29 @@ INLINE size_t adjust_size(size_t size, size_t align)
 */
 INLINE size_t round_block_size(size_t size)
 {
-    uint32_t lg = log2floor(size);
-    size_t is_large = (size_t) (lg >= (uint32_t) FL_SHIFT);
-
-    /* Clamp shift to valid range; garbage value is harmless when is_large=0
-     * because shifting zero by any valid amount yields zero.
-     */
-    uint32_t shift =
-        (lg - (uint32_t) SL_SHIFT) & ((uint32_t) (_TLSF_SIZE_WIDTH - 1));
-    size_t round = is_large << shift;
-    /* Large: (1 << shift) - 1 = SL rounding mask.  Small: 0 - 0 = 0. */
-    size_t t = round - is_large;
+    size_t t = block_size_mask(size);
     return (size + t) & ~t;
+}
+
+/* The inverse direction: the largest request this block size can serve, since
+ * a request is rounded up and must still fit. Takes any mappable block size,
+ * including one above TLSF_MAX_SIZE, which coalescing and pool appends do
+ * build; capping belongs to the caller and cannot be done first without
+ * under-reporting.
+ *
+ * No postcondition, so WP proves only the absence of runtime errors here.
+ * Alt-Ergo timed out at 240s on each of '\result <= size', '\result > 0' and
+ * '\result % ALIGN_SIZE == 0'; bit reasoning over a computed shift is beyond
+ * it. round_block_size() is unannotated for the same reason.
+ */
+/*@
+  requires size > 0;
+  requires size < ((size_t) 1 << FL_MAX);
+  assigns \nothing;
+*/
+INLINE size_t floor_block_size(size_t size)
+{
+    return size & ~block_size_mask(size);
 }
 
 /* Map size to first-level (fl) and second-level (sl) bin indices. Branch-free:
@@ -1940,6 +1984,7 @@ void tlsf_check(tlsf_t *t)
  * - overhead: Metadata bytes (block headers + sentinel)
  * - block_count: Total blocks including used and free
  * - free_count: Number of free blocks (fragmentation indicator)
+ * - largest_free: Largest single allocation the allocator can serve
  */
 int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
 {
@@ -1972,10 +2017,17 @@ int tlsf_get_stats(tlsf_t *t, tlsf_stats_t *stats)
         stats->overhead += BLOCK_OVERHEAD;
 
         if (block_is_free(block)) {
+            /* Floor first, then cap. Capping first would floor the cap and
+             * report less than tlsf_malloc() will actually serve.
+             */
+            size_t floored = floor_block_size(bsize);
+            size_t alloc_size =
+                floored > TLSF_MAX_SIZE ? TLSF_MAX_SIZE : floored;
+
             stats->free_count++;
             stats->total_free += bsize;
-            if (bsize > stats->largest_free)
-                stats->largest_free = bsize;
+            if (alloc_size > stats->largest_free)
+                stats->largest_free = alloc_size;
         } else {
             stats->total_used += bsize;
         }
