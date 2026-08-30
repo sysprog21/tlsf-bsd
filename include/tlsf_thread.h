@@ -198,12 +198,25 @@
 #if defined(_MSC_VER)
 #define TLSF_MSVC_ALIGN(x) __declspec(align(x))
 #define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x)
 #elif defined(__GNUC__) || defined(__clang__)
 #define TLSF_MSVC_ALIGN(x)
 #define TLSF_GCC_ALIGN(x) __attribute__((aligned(x)))
+#define TLSF_C11C23_ALIGN(x)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L && \
+    !defined(__cplusplus)
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x) alignas(x)
+#elif (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L) && \
+    !defined(__cplusplus)
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x) _Alignas(x)
 #else
 #define TLSF_MSVC_ALIGN(x)
 #define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x)
 #endif
 
 /* Define here optional TLSF_THREAD_HINT()
@@ -341,7 +354,7 @@ extern "C" {
 #endif
 
 TLSF_MSVC_ALIGN(TLSF_CACHELINE_SIZE) typedef struct {
-    tlsf_t pool;
+    TLSF_C11C23_ALIGN(TLSF_CACHELINE_SIZE) tlsf_t pool;
     TLSF_LOCK_T lock;
 
     /* Raw chunk handed to this arena. Ownership lookup tests against this
