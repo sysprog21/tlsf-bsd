@@ -536,10 +536,11 @@ INLINE char *block_payload(tlsf_block_t *block)
 INLINE tlsf_block_t *to_block(void *ptr)
 {
     tlsf_block_t *block = (tlsf_block_t *) ptr;
+
     /* align_offset(), not align_ptr(): this only tests alignment, and
-     * align_ptr() would additionally require the caller to own a full
-     * alignment window that to_block() cannot promise. The two are
-     * equivalent here, since align_ptr(p, a) is p + align_offset(p, a).
+     * align_ptr() would additionally require the caller to own a full alignment
+     * window that to_block() cannot promise. The two are equivalent here, since
+     * align_ptr(p, a) is p + align_offset(p, a).
      */
     ASSERT(align_offset(block_payload(block), ALIGN_SIZE) == 0,
            "block not aligned properly");
@@ -760,18 +761,14 @@ INLINE size_t adjust_size(size_t size, size_t align)
     return size < BLOCK_SIZE_MIN ? BLOCK_SIZE_MIN : size;
 }
 
-/* Round up to the next block size. Branch-free: for small sizes (<
- * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
- * large sizes, it rounds up to the next second-level bin boundary.
- */
 /* Second-level bin mask: all-zero below BLOCK_SIZE_SMALL, where bins are
  * linear, and (1 << shift) - 1 above it. Both rounding directions need it, so
  * it lives here rather than twice.
  *
  * The shift clamp is load-bearing, not defensive: an aligned size still only
  * gives lg >= ALIGN_SHIFT, so lg - SL_SHIFT wraps for the smallest sizes and
- * would be undefined without it. The wrapped value is harmless because
- * is_large is zero there and zero shifted by anything is zero.
+ * would be undefined without it. The wrapped value is harmless because is_large
+ * is zero there and zero shifted by anything is zero.
  */
 /*@
   requires size > 0;
@@ -787,6 +784,10 @@ INLINE size_t block_size_mask(size_t size)
     return (is_large << shift) - is_large;
 }
 
+/* Round up to the next block size. Branch-free: for small sizes (<
+ * BLOCK_SIZE_SMALL), the rounding mask is zero, producing an identity. For
+ * large sizes, it rounds up to the next second-level bin boundary.
+ */
 /*@
   requires size > 0;
   requires size <= TLSF_MAX_SIZE;
@@ -799,8 +800,8 @@ INLINE size_t round_block_size(size_t size)
     return (size + t) & ~t;
 }
 
-/* The inverse direction: the largest request this block size can serve, since
- * a request is rounded up and must still fit. Takes any mappable block size,
+/* The inverse direction: the largest request this block size can serve, since a
+ * request is rounded up and must still fit. Takes any mappable block size,
  * including one above TLSF_MAX_SIZE, which coalescing and pool appends do
  * build; capping belongs to the caller and cannot be done first without
  * under-reporting.
