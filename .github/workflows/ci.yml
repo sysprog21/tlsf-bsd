@@ -48,6 +48,13 @@ jobs:
       # expands them, and .ci/check-abi-guard.sh proves the result links, so
       # the finding says something about cppcheck rather than about the header.
       #
+      # The fourth is the same emulation failing on get_thread_hint(). Where a
+      # caller supplies TLSF_THREAD_HINT(), cppcheck has no definition to expand
+      # and reports the call as a syntax error. The cppcheck this job installs
+      # is several minor versions behind current and does not report it yet; a
+      # newer one does, so the suppression is here before a runner image bump
+      # turns a tool limitation into a red build on untouched code.
+      #
       # The suppressions are flags rather than a suppression file: the file
       # format is not portable across cppcheck versions, and the one in Ubuntu
       # 24.04 rejects the comments that made the file worth having.
@@ -64,6 +71,7 @@ jobs:
             --suppress=knownConditionTrueFalse:src/tlsf.c \
             --suppress=preprocessorErrorDirective:include/tlsf.h \
             --suppress=preprocessorErrorDirective:include/tlsf_thread.h \
+            --suppress=syntaxError:src/tlsf_thread.c \
             --error-exitcode=1 --quiet src include
 
   # Nothing measured how much of the allocator the suite reached until this
