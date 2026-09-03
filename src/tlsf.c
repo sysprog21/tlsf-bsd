@@ -1591,6 +1591,14 @@ void *tlsf_malloc(tlsf_t *t, size_t size)
     return block_use(t, block, size);
 }
 
+/* The bound below subtracts 'align' and the block struct from TLSF_MAX_SIZE,
+ * and that subtraction leans on the power-of-two test two lines above it: the
+ * largest power of two not exceeding TLSF_MAX_SIZE is under half of it, which
+ * leaves the remainder well clear of zero. 64-bit gives TLSF_MAX_SIZE 2^31 - 8
+ * against a largest align of 2^30, 32-bit gives 2^24 - 4 against 2^23. Relaxing
+ * either the power-of-two requirement or TLSF_MAX_SIZE reintroduces an
+ * underflow here that admits a size the arithmetic below cannot hold.
+ */
 void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size)
 {
     size_t adjust = adjust_size(size, ALIGN_SIZE);
