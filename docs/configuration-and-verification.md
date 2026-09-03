@@ -169,10 +169,29 @@ Four consequences worth knowing:
 Frama-C is exempted from the renaming, since it analyses one translation unit at
 a time and the suffixes would invalidate the `-wp-fct` list in the Makefile.
 
+The C++ adapters would be a hole in all of this if they were left untagged. A
+class defined in a header has weak definitions for its vtable and its inline
+virtual functions, and those mangled names carry no configuration, so two
+mismatched units emit the same `do_allocate` twice. A linker that keeps one
+COMDAT group and discards the other discards the reference to the suffixed C
+symbol along with it, and the undefined reference that should have failed the
+link is gone. Both classes therefore sit in an inline namespace named by the
+same suffix, `pmr_resource` by the core one and `pmr_thread_resource` by the
+wider thread one. An inline namespace is transparent to lookup, so callers
+still write `tlsf::pmr_resource`.
+
 `.ci/check-abi-guard.sh` tests both directions: a mismatched pair must fail to
 link, and a matched pair must still build and run. The second half matters as
 much as the first, because a guard that rejects legitimate builds is worse than
 no guard.
+
+For the C++ classes it compares mangled names instead of link outcomes, because
+whether a mismatch reaches the linker is a property of the object format: Mach-O
+keeps the discarded copy's reference and rejects the link either way, so a link
+test would pass there while proving nothing. The three cases are that
+`TLSF_MAX_POOL_BITS` changes `pmr_resource`'s mangled `do_allocate`, that
+`TLSF_ARENA_COUNT` changes `pmr_thread_resource`'s, and that a thread-only knob
+leaves `pmr_resource` alone.
 
 ## Verification
 
@@ -235,8 +254,8 @@ make check TLSF_DEBUG_FLAGS=    # the same, compiled the way the library ships
 ```
 
 `make check` runs the core test and the three benchmark configurations under
-`MALLOC_CHECK_=3`, then the WCET harness, the thread stress test and the C++
-compile test.
+`MALLOC_CHECK_=3`, then the WCET harness, the thread stress test, the C++
+compile test and the `std::pmr` test.
 
 `tests/test.c` is the core suite: randomized allocate/free/realloc storms
 against a pool, with `tlsf_check()` run periodically rather than after every
@@ -251,7 +270,37 @@ public function, and address reuse.
 realloc and aligned allocation across threads, with `tlsf_thread_check()`
 verifying every arena afterwards. `tests/test_cpp.cpp` compiles the public
 headers as C++ and exercises the API, which is what keeps them free of C-only
-constructs. `tests/fuzz.c` is covered below.
+constructs; it stays at C++11, which is the baseline the headers promise.
+
+`tests/test_pmr.cpp` covers the optional adapters and is the one target built
+at C++17. It fills a `std::pmr::vector` of an over-aligned element through both
+resources, checking the alignment after every `push_back()` so the reallocation
+path counts rather than only the first block, and it pins the three behaviours
+a PMR consumer depends on: exhaustion raises `std::bad_alloc`, a request past
+the largest arena fails even though the arenas together hold more, and distinct
+resources over one pool never compare equal. The equality assertions go through
+`is_equal()` rather than `==`. `operator==` is specified as
+`&a == &b || a.is_equal(b)`, so a same-object comparison short-circuits before
+the class is reached, while a distinct-object comparison does reach it but is
+satisfied by any override that answers false. Neither case catches a
+`do_is_equal()` stuck at false, which is how the first version of this test
+passed while testing nothing.
+
+Because the adapters need a newer toolchain than the library itself does, the
+Makefile probes for `<memory_resource>` and drops the target when it is absent,
+printing `test_pmr: skipped`. An optional header must not become a floor under
+the whole build.
+
+Exceptions are not part of that floor either. `-fno-exceptions` is ordinary in
+embedded C++, and under it the adapters call `std::terminate()` on exhaustion,
+the only non-null failure outcome a `memory_resource` can offer. A CI job
+builds the whole tree that way. The first three checks above all reach
+exhaustion through a `throw`, so they are compiled out there and the parenthesis
+they would otherwise be reported under does not exist; what replaces them is a
+`fork()` whose child allocates past the pool and must die on `SIGABRT`. Without
+it the job would prove only that the headers compile, and a `do_allocate()`
+that returned the null pointer instead of terminating would pass.
+`tests/fuzz.c` is covered below.
 
 How much of the allocator all of that reaches is measured rather than assumed:
 

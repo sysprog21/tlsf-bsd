@@ -132,6 +132,9 @@ jobs:
             cc: clang
             cflags: "-fsanitize=address,undefined"
           - runner: ubuntu-24.04
+            cc: gcc
+            cxxflags: "-fno-exceptions"
+          - runner: ubuntu-24.04
             cc: clang
             cflags: "-fsanitize=address,undefined -DTLSF_ENABLE_POISON"
           - runner: ubuntu-24.04-arm
@@ -200,12 +203,14 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
+          CXXFLAGS: ${{ matrix.cxxflags }}
           CPPFLAGS: ${{ matrix.cflags }}
       - name: Test
         run: make check ${{ matrix.make_args }}
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cc == 'clang' && 'clang++' || 'g++' }}
+          CXXFLAGS: ${{ matrix.cxxflags }}
           CPPFLAGS: ${{ matrix.cflags }}
   
   # 32-bit build: exercises the _TLSF_SIZE_WIDTH == 32 paths (ALIGN_SHIFT 2,
@@ -325,6 +330,24 @@ jobs:
       - name: Run Multi-Threaded Tests (native lock)
         run: |
           .\test_thread_native.exe
+      # The only place the std::pmr adapters meet MSVC, and the reason their
+      # language gate reads '_MSVC_LANG': cl leaves '__cplusplus' at 199711L
+      # unless '/Zc:__cplusplus' is passed, and '/std:c++17' does not imply it,
+      # so a gate on '__cplusplus' alone rejects this exact command line. That
+      # flag is deliberately absent here. Everything else in this job compiles
+      # C++ at /std:c++14, which the adapters correctly refuse.
+      #
+      # '/EHsc' because do_allocate throws on exhaustion; without it cl warns
+      # C4530 and the throw is not the one the test is checking for. Links the
+      # native-lock 'tlsf_thread.obj' left by the step above, so the C and C++
+      # units agree on the backend and the token paste, the same pairing the
+      # /std:c++14 steps test.
+      - name: Compile C++17 PMR Test with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c++17 /EHsc /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\test_pmr.cpp tlsf.obj tlsf_thread.obj /Fe:test_pmr.exe
+      - name: Run C++17 PMR Test
+        run: |
+          .\test_pmr.exe
       - name: Compile Benchmark TLSF with MSVC
         run: |
           cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\bench.c tlsf.obj /Fe:bench_tlsf.exe /link Psapi.lib

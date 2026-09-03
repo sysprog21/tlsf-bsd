@@ -187,6 +187,74 @@ The full knob list is in
 [Thread wrapper flags](docs/configuration-and-verification.md#thread-wrapper-flags),
 and the design is in [Concurrency](docs/operations.md#concurrency).
 
+### C++ std::pmr adapters
+
+`include/tlsf_pmr.hpp` is an optional, header-only C++17 wrapper for consumers
+that accept a `std::pmr::memory_resource`, such as ROS 2 nodes. Including it
+requires C++17; the library and its public headers stay C11 and C++11.
+
+```cpp
+#include <vector>
+
+#include "tlsf_pmr.hpp"
+
+alignas(64) static unsigned char memory[64 * 1024];
+
+tlsf_t pool = TLSF_INIT;
+if (!tlsf_pool_init(&pool, memory, sizeof(memory)))
+    return -1;
+
+tlsf::pmr_resource res(pool);
+std::pmr::vector<int> v(&res);
+v.push_back(1);
+```
+
+`tlsf::pmr_thread_resource`, in the separate `include/tlsf_thread_pmr.hpp`,
+is the same wrapper over `tlsf_thread_t`, so a concurrent PMR user gets the
+per-arena locks instead of one global mutex. It is a separate header because
+`tlsf_thread.h` pulls in the platform's threading header and needs a lock
+backend, which a single-threaded consumer of `pmr_resource` should not have to
+supply:
+
+```cpp
+#include "tlsf_thread_pmr.hpp"
+
+alignas(TLSF_CACHELINE_SIZE) static unsigned char thread_memory[256 * 1024];
+
+tlsf_thread_t ts;
+if (!tlsf_thread_init(&ts, thread_memory, sizeof(thread_memory)))
+    return -1;
+
+tlsf::pmr_thread_resource res(ts);
+```
+
+Both are non-owning views: the pool and the resource must outlive every
+allocation, since a `std::pmr` container calls back into the resource when it
+is destroyed. Every allocation routes through `tlsf_aalloc()`, so a container
+of over-aligned elements gets the alignment it asked for. Exhaustion throws
+`std::bad_alloc`; with exceptions disabled it calls `std::terminate()` instead,
+since `memory_resource` may not return a null allocation. That kills the
+process, and `std::set_terminate()` is the only hook, so a caller for which
+exhaustion is a recoverable condition should use `tlsf_aalloc()` directly
+rather than reach the allocator through PMR. Neither adds locking of its own.
+`pmr_resource` is unsynchronized exactly like the C allocator, and
+`pmr_thread_resource` inherits the contracts in `tlsf_thread.h`.
+
+Be precise about what the O(1) claim covers, because reaching TLSF through PMR
+does not widen it. Bounded is the allocator's own work on one call: finding a
+fit is two bitmap scans, and splitting and coalescing are constant-time. Four
+costs sit outside that bound, and PMR changes none of them.
+
+| Cost | Why it is still there |
+|------|----------------------|
+| Container growth | A `std::pmr::vector` that outgrows its capacity allocates once and then moves every element it already held, so `push_back()` is O(n) in the worst case however fast the allocation was. |
+| External fragmentation | The size classes bound *internal* fragmentation to about 3.125%. Whether a request finds a large enough free block still depends on the order the caller allocated and freed; when none exists, `do_allocate()` throws `std::bad_alloc`, or terminates where exceptions are disabled. |
+| Virtual dispatch | Every allocation through a `memory_resource` is an indirect call that a direct `tlsf_malloc()` is not. |
+| Lock waits | For `pmr_thread_resource` only. Per-arena locking makes contention less likely; it does not bound how long a thread waits once contended. |
+
+A latency budget has to account for all four on top of the allocator's own
+bound.
+
 ## How It Works
 
 TLSF keeps free blocks pre-sorted into size classes, and keeps one bit per class
@@ -331,10 +399,6 @@ lists the timing sources, the raw-sample options, and a sample run.
 M. Masmano, I. Ripoll, A. Crespo, and J. Real.
 TLSF: a new dynamic memory allocator for real-time systems.
 In Proc. ECRTS (2004), IEEE Computer Society, pp. 79-86.
-
-## Related Projects
-
-* [tlsf-pmr](https://github.com/LiemDQ/tlsf-pmr): C++17 PMR allocator using TLSF
 
 ## Licensing
 
