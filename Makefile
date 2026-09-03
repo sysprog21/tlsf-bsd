@@ -1,5 +1,7 @@
 OUT = build
 
+.DEFAULT_GOAL := all
+
 FRAMAC ?= frama-c
 
 # Leaf helpers carrying ACSL contracts. No caller of these is in the list yet,
@@ -42,7 +44,11 @@ TARGETS := $(addprefix $(OUT)/,$(TARGETS))
 THREAD_TARGETS = $(OUT)/test_thread
 CPP_TARGETS = $(OUT)/test_cpp
 
-all: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
+# Named outside the probe below so 'clean' can remove it either way. A tree
+# built with a C++17 toolchain and cleaned with an older one would otherwise
+# keep a stale binary and its dep file, which is the same trap the 'deps'
+# comment further down guards against.
+PMR_TARGET = $(OUT)/test_pmr
 
 # Full benchmark with statistical rigor (50 iterations, 5 warmup)
 bench: all
@@ -70,17 +76,44 @@ override CPPFLAGS += -Iinclude $(TLSF_DEBUG_FLAGS)
 TLSF_WARNINGS = \
   -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual -Wconversion
 
-CFLAGS += \
+override CFLAGS += \
   -std=gnu11 -g -O2 \
   $(TLSF_WARNINGS) -Wc++-compat
 
-CXXFLAGS += \
+override CXXFLAGS += \
   -std=c++11 -g -O2 \
   $(TLSF_WARNINGS) -pedantic-errors
 
+# The public headers stay compilable as C++11 while the adapters need C++17.
+# Appending a second -std rather than editing CXXFLAGS keeps that split: the
+# later flag wins, so tests/test_cpp.cpp still proves the C++11 baseline and
+# only this one target is raised. A caller's own '-std' is overridden here, as
+# it already is for test_cpp, because 'override CXXFLAGS +=' appends to the
+# caller's value rather than replacing it, leaving that value first on the
+# command line. Plain '+=' would append only to an environment value and be
+# skipped outright for a command-line one, so a command-line CXXFLAGS would
+# build test_cpp with no -std at all and pin nothing.
+CXX17FLAGS = $(CXXFLAGS) -std=c++17
+
+# The std::pmr adapters are optional, so their probe uses the same
+# preprocessor and C++ flags as their target before adding it to 'check'.
+#
+# No exceptions are needed to use the adapters: a failed allocation terminates
+# when they are disabled, because memory_resource cannot report a null result.
+PMR_PROBE := $(shell printf \
+	'\043include <memory_resource>\nint main(){}\n' \
+	| $(CXX) $(CPPFLAGS) $(CXX17FLAGS) -pthread -fsyntax-only \
+		-x c++ - 2>/dev/null && echo yes)
+ifeq ($(PMR_PROBE),yes)
+CPP_TARGETS += $(PMR_TARGET)
+endif
+
+all: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
+
 # The header's own knobs are spelled '_TLSF_' as well as 'TLSF_', and either
 # prefix can arrive as -U rather than -D, so all four forms have to be caught.
-ifneq ($(filter -DTLSF_% -D_TLSF_% -UTLSF_% -U_TLSF_%,$(CFLAGS) $(CXXFLAGS)),)
+ifneq ($(filter -DTLSF_% -D_TLSF_% -UTLSF_% -U_TLSF_%, \
+	$(CFLAGS) $(CXXFLAGS) $(CXX17FLAGS)),)
 $(error Pass TLSF configuration macros through CPPFLAGS, not CFLAGS or CXXFLAGS)
 endif
 
@@ -93,7 +126,7 @@ THREAD_OBJS = $(OUT)/tlsf_thread.o
 # file behind. $(OUT)/test is deliberately absent: its rule emits no dep file.
 deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
 	$(OUT)/bench.d $(OUT)/wcet.d $(OUT)/fuzz.d $(OUT)/check_negative.d \
-	$(THREAD_TARGETS:%=%.d) $(CPP_TARGETS:%=%.d)
+	$(THREAD_TARGETS:%=%.d) $(CPP_TARGETS:%=%.d) $(PMR_TARGET:%=%.d)
 
 # Make compares timestamps, not command lines, so flipping a variable on the
 # command line rebuilds nothing. 'make check TLSF_DEBUG_FLAGS=' on an
@@ -107,7 +140,8 @@ deps := $(OBJS:%.o=%.o.d) $(THREAD_OBJS:%.o=%.o.d) \
 # LDFLAGS-only change also recompiles the two objects. Rebuilding more than
 # strictly needed is safe, and a second stamp is not worth the machinery here.
 FLAGS_STAMP := $(OUT)/.build-flags
-BUILD_FLAGS := $(CC) $(CXX) $(CPPFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS)
+BUILD_FLAGS := $(CC) $(CXX) $(CPPFLAGS) $(CFLAGS) $(CXXFLAGS) $(CXX17FLAGS) \
+	$(LDFLAGS)
 
 # Exported rather than pasted into the recipe text. A flag value may contain a
 # quote, and interpolating one into a quoted shell word would end the string
@@ -160,19 +194,34 @@ $(OUT)/test_cpp: $(OBJS) $(THREAD_OBJS) tests/test_cpp.cpp $(FLAGS_STAMP)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
 		$(THREAD_OBJS) tests/test_cpp.cpp $(LDFLAGS)
 
+$(PMR_TARGET): $(OBJS) $(THREAD_OBJS) tests/test_pmr.cpp $(FLAGS_STAMP)
+	$(CXX) $(CPPFLAGS) $(CXX17FLAGS) -pthread -o $@ -MMD -MF $@.d $(OBJS) \
+		$(THREAD_OBJS) tests/test_pmr.cpp $(LDFLAGS)
+
 $(OUT)/%.o: src/%.c $(FLAGS_STAMP)
 	@mkdir -p $(OUT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ -MMD -MF $@.d $<
 
+# Every runner below names $(OUT) rather than a literal 'build'. With the
+# literal, 'make OUT=elsewhere check' built into one directory and ran whatever
+# an earlier build had left in the other, reporting a pass for binaries it had
+# not produced; with no 'build' at all it failed on the first line. The path
+# carries a slash either way, so no './' prefix is needed, and dropping it is
+# also what lets an absolute $(OUT) work.
 check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS) check-negative
-	MALLOC_CHECK_=3 ./build/test
-	MALLOC_CHECK_=3 ./build/bench -l 10000 -i 3 -w 1
-	MALLOC_CHECK_=3 ./build/bench -s 32 -l 10000 -i 3 -w 1
-	MALLOC_CHECK_=3 ./build/bench -s 10:12345 -l 10000 -i 3 -w 1
-	./build/wcet -i 100 -w 10
-	MALLOC_CHECK_=3 ./build/fuzz
-	./build/test_thread
-	./build/test_cpp
+	MALLOC_CHECK_=3 $(OUT)/test
+	MALLOC_CHECK_=3 $(OUT)/bench -l 10000 -i 3 -w 1
+	MALLOC_CHECK_=3 $(OUT)/bench -s 32 -l 10000 -i 3 -w 1
+	MALLOC_CHECK_=3 $(OUT)/bench -s 10:12345 -l 10000 -i 3 -w 1
+	$(OUT)/wcet -i 100 -w 10
+	MALLOC_CHECK_=3 $(OUT)/fuzz
+	$(OUT)/test_thread
+	$(OUT)/test_cpp
+ifeq ($(PMR_PROBE),yes)
+	$(PMR_TARGET)
+else
+	@echo "test_pmr: skipped ($(CXX) lacks C++17 <memory_resource>)"
+endif
 
 # Each case must abort with the CHECK diagnostic it names, not with a segfault
 # that looks like one and not with some other check that happens to fire first.
@@ -192,22 +241,22 @@ check: $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS) check-negative
 # then rejects. Cores are off because the aborts are expected.
 check-negative: $(OUT)/check_negative
 	@ulimit -c 0; \
-	./$(OUT)/check_negative; n=$$?; \
+	$(OUT)/check_negative; n=$$?; \
 	if [ "$$n" -eq 0 ]; then \
 		echo "check_negative: skipped (built without TLSF_ENABLE_CHECK)"; \
 		exit 0; \
 	fi; \
-	if ! ./$(OUT)/check_negative -1 >/dev/null 2>&1; then \
+	if ! $(OUT)/check_negative -1 >/dev/null 2>&1; then \
 		echo "check_negative: control case failed; harness is broken" >&2; \
 		exit 1; \
 	fi; \
 	i=0; \
 	while [ "$$i" -lt "$$n" ]; do \
-		if ! want=$$(./$(OUT)/check_negative -e $$i 2>&1); then \
+		if ! want=$$($(OUT)/check_negative -e $$i 2>&1); then \
 			echo "check_negative: case $$i has no expected message:" >&2; \
 			echo "$$want" >&2; exit 1; \
 		fi; \
-		if out=$$(./$(OUT)/check_negative $$i 2>&1); then \
+		if out=$$($(OUT)/check_negative $$i 2>&1); then \
 			echo "check_negative: case $$i accepted by tlsf_check()" >&2; \
 			exit 1; \
 		fi; \
@@ -265,20 +314,20 @@ fuzz: $(FLAGS_STAMP)
 
 # Full WCET measurement (10000 iterations, 1000 warmup)
 wcet: all
-	./build/wcet
+	$(OUT)/wcet
 
 # Quick WCET check for development
 wcet-quick: all
-	./build/wcet -i 1000 -w 100
+	$(OUT)/wcet -i 1000 -w 100
 
 # WCET with raw output and analysis plots
 wcet-plot: all
 	@mkdir -p $(OUT)
-	./build/wcet -i 10000 -r $(OUT)/wcet_raw.csv -c > $(OUT)/wcet_summary.csv
+	$(OUT)/wcet -i 10000 -r $(OUT)/wcet_raw.csv -c > $(OUT)/wcet_summary.csv
 	python3 scripts/wcet_plot.py $(OUT)/wcet_raw.csv -o $(OUT)/wcet
 
 clean:
-	$(RM) $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS)
+	$(RM) $(TARGETS) $(THREAD_TARGETS) $(CPP_TARGETS) $(PMR_TARGET)
 	$(RM) $(OBJS) $(THREAD_OBJS) $(deps) $(FLAGS_STAMP)
 	$(RM) $(OUT)/wcet_raw.csv $(OUT)/wcet_summary.csv
 	$(RM) $(OUT)/wcet_boxplot.png $(OUT)/wcet_histogram.png

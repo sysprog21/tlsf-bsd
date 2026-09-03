@@ -22,7 +22,17 @@ static TLSF_THREAD_LOCAL unsigned int tlsf_thread_id = 0;
 static inline unsigned int get_thread_hint(void)
 {
 #if defined(TLSF_THREAD_LOCAL)
-    return (unsigned) ((uintptr_t) &tlsf_thread_id);
+    /* Fold the whole address in before narrowing to 'unsigned'. A target that
+     * spaces thread local blocks more than 4 GB apart hands every thread the
+     * same low half, and arena_select() would then send all of them to arena 0
+     * and forfeit the per-arena locking entirely.
+     *
+     * Two 16-bit shifts rather than one 32-bit: where uintptr_t is 32 bits a
+     * shift by the full width is undefined, and this pair yields zero there,
+     * which leaves the value unchanged as it must be.
+     */
+    uintptr_t p = (uintptr_t) &tlsf_thread_id;
+    return (unsigned) (p ^ (p >> 16 >> 16));
 #elif defined(TLSF_THREAD_HINT)
     return TLSF_THREAD_HINT();
 #else

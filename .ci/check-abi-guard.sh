@@ -12,6 +12,7 @@ set -e -u -o pipefail
 
 CC="${CC:-cc}"
 CFLAGS_COMMON="-Iinclude -std=gnu11 -O1 -pthread"
+CXXFLAGS_COMMON="-Iinclude -std=c++17 -pthread"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -108,9 +109,9 @@ check fails "-DTLSF_CACHELINE_SIZE=128" thread "thread: TLSF_CACHELINE_SIZE mism
 check fails "-DTLSF_MAX_POOL_BITS=20" thread "thread: TLSF_MAX_POOL_BITS mismatch"
 
 # TLSF_C11_THREADS does not decide the lock backend on its own. The header
-# selects on _TLSF_USE_C11_THREADS, which also needs the compiler to have a usable
-# '<threads.h>', so whether the flag changes anything is a property of the host.
-# Ask the header which backend it picked rather than inferring it.
+# selects on _TLSF_USE_C11_THREADS, which also needs the compiler to have a
+# usable '<threads.h>', so whether the flag changes anything is a property of
+# the host. Ask the header which backend it picked rather than inferring it.
 #
 # Do not infer it from sizeof either. On glibc, mtx_t and pthread_mutex_t are
 # the same size, so the wrapper measures identical while the lock operations
@@ -176,8 +177,8 @@ EOF
 # Swallowing the preprocessor's exit status, not its diagnostics: those still
 # reach the job log. A directive the header rejects under these defines would
 # otherwise take 'set -e' out through the command substitution below, ending the
-# script on a bare status with none of the checks reported. A failure here has to
-# print its FAIL line like every other check, which is what the empty-value
+# script on a bare status with none of the checks reported. A failure here has
+# to print its FAIL line like every other check, which is what the empty-value
 # default below is for.
 win_symbol() {
 	# shellcheck disable=SC2086
@@ -203,6 +204,154 @@ else
 	echo "FAIL: thread: Windows lock backends share a symbol name" \
 		"($srwlock vs $crsection)"
 	ret=1
+fi
+
+# The C++ adapters in include/tlsf_pmr.hpp and include/tlsf_thread_pmr.hpp would
+# be a hole in everything above if their classes were left untagged. A
+# header-defined class has weak definitions for its vtable and its inline
+# virtuals, and those mangled names carry no configuration, so two mismatched
+# units emit the same 'do_allocate' twice. A linker that keeps one COMDAT group
+# and discards the other discards the discarded copy's reference to the suffixed
+# C symbol with it, and the undefined reference that should have failed the link
+# is gone. The classes sit in inline namespaces named by the same suffix so that
+# cannot happen.
+#
+# Names, not link behavior, for the reason the Windows arm above gives: whether
+# a mismatch reaches the linker is a property of the object format. Mach-O keeps
+# the reference and rejects the link with or without the tagging, so a link test
+# would pass there while proving nothing. The mangled name differs on every
+# host.
+CXX="${CXX:-c++}"
+
+cat >"$tmp/pmr.cpp" <<'EOF'
+#include "tlsf_pmr.hpp"
+#include "tlsf_thread_pmr.hpp"
+static tlsf_t core;
+static tlsf_thread_t threaded;
+tlsf::pmr_resource core_res(core);
+tlsf::pmr_thread_resource thread_res(threaded);
+EOF
+
+# Print the last probe's compiler output, indented, if there is any. The file is
+# absent when the probe never ran, and a redirection from a missing file is a
+# shell error that no redirection on the reader can silence.
+pmr_log() {
+	[ -f "$tmp/pmr.log" ] && sed 's/^/    /' <"$tmp/pmr.log"
+	return 0
+}
+
+# $1 selects the class, $2 and up are the caller's configuration flags.
+#
+# The object is named after the flags and reused. Every pmr_check needs the
+# unflagged baseline, so compiling on each call rebuilt an unchanged file once
+# per check, and the same variant is asked for by two different checks.
+#
+# Keyed on a checksum, not on the flags with punctuation folded away: that
+# folding maps '-DX=8' and '-DX 8' to one name, and reusing the wrong object
+# here would answer "same" to a check whose whole purpose is noticing when two
+# configurations differ.
+pmr_symbol() {
+	which="$1"
+	shift
+	obj="$tmp/pmr$(printf '%s' "$*" | cksum | tr -cd '0-9').o"
+	if [ ! -f "$obj" ]; then
+		# shellcheck disable=SC2086
+		$CXX $CXXFLAGS_COMMON -O0 "$@" -c -o "$obj" \
+			"$tmp/pmr.cpp" >"$tmp/pmr.log" 2>&1 || return 1
+	fi
+	case "$which" in
+	core) nm "$obj" | grep do_allocate | grep pmr_resource |
+		grep -v pmr_thread_resource ;;
+	thread) nm "$obj" | grep do_allocate | grep pmr_thread_resource ;;
+	esac | awk '{print $NF}' | head -1
+}
+
+# pmr_compiles <flag> -- the adapters must still build under <flag>.
+pmr_compiles() {
+	# shellcheck disable=SC2086
+	if $CXX $CXXFLAGS_COMMON "$1" -fsyntax-only "$tmp/pmr.cpp" \
+		>"$tmp/pmr.log" 2>&1; then
+		echo "ok: pmr: adapters compile with $1"
+	else
+		echo "FAIL: pmr: adapters no longer compile with $1"
+		pmr_log
+		ret=1
+	fi
+}
+
+# same <core|thread> <expected same|differ> <description> <flags...>
+pmr_check() {
+	which="$1"
+	expect="$2"
+	desc="$3"
+	shift 3
+	base="$(pmr_symbol "$which" || true)"
+	other="$(pmr_symbol "$which" "$@" || true)"
+	if [ -z "$base" ] || [ -z "$other" ]; then
+		echo "FAIL: $desc: no do_allocate symbol found"
+		pmr_log
+		ret=1
+		return
+	fi
+	if [ "$base" = "$other" ]; then
+		got=same
+	else
+		got=differ
+	fi
+	if [ "$got" != "$expect" ]; then
+		echo "FAIL: $desc: expected $expect, got $got ($base vs $other)"
+		ret=1
+		return
+	fi
+	echo "ok: $desc ($got)"
+}
+
+# Two probes, not one. The first asks whether this toolchain has what the
+# adapters need, C++17 '<memory_resource>', and a no there is a skip. Only then
+# is a failure to compile the adapters themselves the regression this section
+# exists to catch. Deciding both from a single compile of pmr.cpp would report a
+# header that stopped compiling as a note and exit 0, which is the guard passing
+# while testing nothing.
+cat >"$tmp/pmr_probe.cpp" <<'EOF'
+#include <memory_resource>
+std::pmr::memory_resource *probe = std::pmr::new_delete_resource();
+EOF
+
+# No 'command -v' guard on $CXX: it cannot answer for a value carrying flags,
+# which is an ordinary way to pass them, and a no there skipped everything below
+# without a word. Let the compile decide, and print why.
+# shellcheck disable=SC2086
+if ! $CXX -std=c++17 -fsyntax-only "$tmp/pmr_probe.cpp" \
+	>"$tmp/pmr.log" 2>&1; then
+	echo "note: skipping pmr checks: $CXX has no usable" \
+		"C++17 '<memory_resource>'"
+	pmr_log
+elif ! $CXX $CXXFLAGS_COMMON -fsyntax-only "$tmp/pmr.cpp" \
+	>"$tmp/pmr.log" 2>&1; then
+	echo "FAIL: pmr: $CXX has what the adapters need" \
+		"but cannot compile them"
+	pmr_log
+	ret=1
+else
+	# -fno-exceptions is ordinary in embedded C++, and do_is_equal() promises
+	# in its comment that it declines to compare pools so the headers stay
+	# usable under -fno-rtti. Both are claims about where these headers can be
+	# built, and the change most likely to break either is the one a reviewer
+	# will propose, so each gets a check rather than a comment.
+	pmr_compiles -fno-exceptions
+	pmr_compiles -fno-rtti
+
+	pmr_check core differ "pmr: TLSF_MAX_POOL_BITS reaches pmr_resource" \
+		-DTLSF_MAX_POOL_BITS=20
+	pmr_check thread differ \
+		"pmr: TLSF_ARENA_COUNT reaches pmr_thread_resource" \
+		-DTLSF_ARENA_COUNT=8
+
+	# The two classes are tagged separately on purpose. Folding them into one
+	# namespace would reject a pair of units differing only in a knob that does
+	# not move 'tlsf_t', which is a working build turned into a link error.
+	pmr_check core same "pmr: a thread knob leaves pmr_resource alone" \
+		-DTLSF_ARENA_COUNT=8
 fi
 
 exit $ret

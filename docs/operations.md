@@ -409,3 +409,43 @@ arenas under contention, so a pathological hash collision stays collided. And it
 does not thread-cache: every allocation takes a lock, unlike jemalloc's
 `tcache`, which serves most allocations without one. Both are deliberate, since
 both cost determinism, which is the property this allocator exists to provide.
+
+### C++ std::pmr adapters
+
+`include/tlsf_pmr.hpp` and `include/tlsf_thread_pmr.hpp` are optional,
+header-only C++17 views that present `tlsf_t` and `tlsf_thread_t` as a
+`std::pmr::memory_resource`. They are two files rather than one for the reason
+`tlsf.h` and `tlsf_thread.h` are: including the thread header pulls in the
+platform's threading header and needs a lock backend, which a single-threaded
+consumer of `pmr_resource` should not have to supply.
+
+Neither owns a pool, and neither adds locking. `pmr_resource` is unsynchronized
+exactly as the C allocator is. `pmr_thread_resource` inherits the per-arena
+locking, arena selection and quiescence contracts above rather than layering a
+second policy on them, which means the partitioning trade-off above reaches PMR
+unchanged: a `std::pmr` container asking for more than roughly 1/N of the pool
+gets `std::bad_alloc` while the other arenas sit idle. Per-arena locking lowers
+contention; it is not a jitter-free guarantee.
+
+Every allocation routes through `tlsf_aalloc()` or `tlsf_thread_aalloc()`,
+since `std::pmr` always states the alignment it needs and `tlsf_malloc()`
+promises only the natural one. A null return becomes `std::bad_alloc`. Where
+the build has no exceptions it becomes `std::terminate()` instead, because
+`do_allocate()` may not return null and not returning at all is the only
+conforming outcome left; `std::set_terminate()` is the only hook over it. That
+makes exhaustion a process kill rather than an error a caller can act on, so
+code that treats a full pool as a recoverable condition belongs on
+`tlsf_aalloc()` directly and not on PMR. The
+deallocation size and alignment `std::pmr` supplies are dropped, because the
+block header already carries the size. Equality is object identity, which is
+conservative: two wrappers over one pool are interchangeable in fact, and
+saying so would mean recovering the other resource's type through a
+`dynamic_cast` and so requiring RTTI, which these headers do not. The cost is
+that a container moving between two such resources moves elements rather than
+stealing the buffer.
+
+Each class lives in an inline namespace named by the configuration suffix its
+own C symbols carry, the core knobs for `pmr_resource` and the wider thread set
+for `pmr_thread_resource`, so two translation units that disagree about a
+layout knob cannot silently share one definition. See
+[Configuration mismatch guard](configuration-and-verification.md#configuration-mismatch-guard).
