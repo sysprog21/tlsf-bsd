@@ -15,6 +15,12 @@
  * (IAR, Green Hills, TI, ARM Compiler 5) fall through to the portable
  * implementations below, which are fixed-step and therefore still O(1). Define
  * TLSF_NO_INTRINSICS to force that path; CI uses it to test it.
+ * For MSVC, define TLSF_MSVC_MODERN_INTRINSICS to select modern bit scans.
+ * On x86/x64, tzcnt is selected by the macro and lzcnt additionally requires
+ * __AVX2__; ARM selects the corresponding Count* intrinsics instead.
+ * GCC and Clang steer the same choice from the command line rather than from
+ * a macro: -mbmi for tzcnt, -mlzcnt for lzcnt, or -march=haswell for both.
+ * ARM needs no such flag.
  */
 #ifndef TLSF_NO_INTRINSICS
 #if defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__) || \
@@ -277,6 +283,12 @@ INLINE uint32_t bitmap_ffs(uint32_t x)
     ASSERT(x, "no set bit found");
 #if defined(TLSF_BUILTIN_BITSCAN)
     return (uint32_t) __builtin_ctz(x);
+#elif defined(TLSF_MSVC_BITSCAN) && defined(TLSF_MSVC_MODERN_INTRINSICS) && \
+    (defined(_M_X64) || defined(_M_IX86)) && _MSC_VER >= 1700
+    return (uint32_t) _tzcnt_u32(x);
+#elif defined(TLSF_MSVC_BITSCAN) && defined(TLSF_MSVC_MODERN_INTRINSICS) && \
+    (defined(_M_ARM64) || defined(_M_ARM)) && _MSC_VER >= 1936
+    return (uint32_t) _CountTrailingZeros((unsigned long) x);
 #elif defined(TLSF_MSVC_BITSCAN)
     unsigned long index;
     return _BitScanForward(&index, x) ? (uint32_t) index : 0;
@@ -314,6 +326,21 @@ INLINE uint32_t log2floor(size_t x)
 #else
     return (uint32_t) (31 - (uint32_t) __builtin_clzl((unsigned long) x));
 #endif
+#elif defined(TLSF_MSVC_BITSCAN) && defined(TLSF_MSVC_MODERN_INTRINSICS) && \
+    (_TLSF_SIZE_WIDTH == 64) && defined(_M_ARM64) && _MSC_VER >= 1912
+    return (uint32_t) (63 -
+                       (uint32_t) _CountLeadingZeros64((unsigned long long) x));
+#elif defined(TLSF_MSVC_BITSCAN) && defined(TLSF_MSVC_MODERN_INTRINSICS) && \
+    (_TLSF_SIZE_WIDTH == 64) && defined(_M_X64) && _MSC_VER >= 1500 &&      \
+    defined(__AVX2__)
+    return (uint32_t) (63 - (uint32_t) __lzcnt64((unsigned long long) x));
+#elif defined(TLSF_MSVC_BITSCAN) && defined(TLSF_MSVC_MODERN_INTRINSICS) && \
+    (_TLSF_SIZE_WIDTH == 32) && defined(_M_ARM) && _MSC_VER >= 1912
+    return (uint32_t) (31 - (uint32_t) _CountLeadingZeros((unsigned long) x));
+#elif defined(TLSF_MSVC_BITSCAN) && defined(TLSF_MSVC_MODERN_INTRINSICS) && \
+    (_TLSF_SIZE_WIDTH == 32) && defined(_M_IX86) && _MSC_VER >= 1500 &&     \
+    defined(__AVX2__)
+    return (uint32_t) (31 - (uint32_t) __lzcnt((unsigned long) x));
 #elif defined(TLSF_MSVC_BITSCAN)
     /* Zero-initialized: the intrinsic leaves index untouched when x is 0, and
      * ASSERT is compiled out in release builds.

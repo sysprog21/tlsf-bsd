@@ -271,12 +271,27 @@ jobs:
       - name: Run Single-Threaded Tests
         run: |
           .\test_tlsf.exe
+      - name: Compile AVX2/Modern TLSF Object with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /arch:AVX2 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_MSVC_MODERN_INTRINSICS /c src\tlsf.c /Fo:tlsf_avx2.obj
+      - name: Compile AVX2/Modern Single-Threaded TLSF with MSVC
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /arch:AVX2 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_MSVC_MODERN_INTRINSICS tests\test.c tlsf_avx2.obj /Fe:test_tlsf_avx2.exe
+      - name: Run Single-Threaded Tests AVX2/Modern
+        run: |
+          .\test_tlsf_avx2.exe
       - name: Compile Multi-Threaded TLSF with MSVC (C11)
         run: |
           cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS src\tlsf_thread.c tests\test_thread.c tlsf.obj /Fe:test_thread.exe
       - name: Run Multi-Threaded Tests
         run: |
           .\test_thread.exe
+      - name: Compile AVX2/Modern Multi-Threaded TLSF with MSVC (C11)
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /arch:AVX2 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_C11_THREADS /DTLSF_MSVC_MODERN_INTRINSICS src\tlsf_thread.c tests\test_thread.c tlsf_avx2.obj /Fe:test_thread_avx2.exe
+      - name: Run AVX2/Modern Multi-Threaded Tests
+        run: |
+          .\test_thread_avx2.exe
       # Neither step below passes /DTLSF_C11_THREADS, and that is the test: the
       # C unit and the C++ unit have to agree on the lock backend and on the
       # token paste, or the link fails on an unresolved 'tlsf_thread_*' symbol.
@@ -354,6 +369,12 @@ jobs:
       - name: Run Benchmark TLSF
         run: |
           .\bench_tlsf.exe -l 10000 -i 3 -w 1
+      - name: Compile Benchmark TLSF with MSVC (AVX2)
+        run: |
+          cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /arch:AVX2 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK /DTLSF_MSVC_MODERN_INTRINSICS tests\bench.c tlsf_avx2.obj /Fe:bench_tlsf_avx2.exe /link Psapi.lib
+      - name: Run Benchmark TLSF (AVX2)
+        run: |
+          .\bench_tlsf_avx2.exe -l 10000 -i 3 -w 1
       - name: Compile WCET TLSF with MSVC
         run: |
           cl.exe /Iinclude /O2 /W3 /we4146 /we4334 /std:c11 /DTLSF_ENABLE_ASSERT /DTLSF_ENABLE_CHECK tests\wcet.c tlsf.obj /Fe:wcet_tlsf.exe

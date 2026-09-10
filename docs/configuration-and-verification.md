@@ -28,6 +28,7 @@ then disagree about `sizeof(tlsf_t)`.
 | `TLSF_ENABLE_CHECK` | off | Compiles `tlsf_check()`; without it the function is an empty stub |
 | `TLSF_ENABLE_POISON` | off | Fills payloads with `0xAA` on allocation and `0xFF` on free |
 | `TLSF_NO_INTRINSICS` | off | Forces the portable bit-scan fallbacks |
+| `TLSF_MSVC_MODERN_INTRINSICS` | off | Uses modern MSVC bit intrinsics only on supported target/toolset configurations; otherwise retains `_BitScanForward` and `_BitScanReverse` (the enabled build requires the emitted CPU instructions) |  
 | `TLSF_MAX_POOL_BITS` | 39 (64-bit), 31 (32-bit) | Lowers the first-level exponent ceiling, which shrinks `FL_COUNT` and with it `tlsf_t` |
 | `TLSF_SPLIT_THRESHOLD` | `BLOCK_SIZE_MIN` | Minimum remainder worth splitting off |
 | `INLINE` | `always_inline` | Override to `static inline` to let the compiler decide; measured 168 bytes smaller in `.text` at -O2 on clang/arm64, with no latency change |
