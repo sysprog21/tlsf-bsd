@@ -32,6 +32,30 @@
 
 #include "pool_limits.h"
 
+#if defined(_MSC_VER)
+#define TLSF_MSVC_ALIGN(x) __declspec(align(x))
+#define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x)
+#elif defined(__GNUC__) || defined(__clang__)
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x) __attribute__((aligned(x)))
+#define TLSF_C11C23_ALIGN(x)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L && \
+    !defined(__cplusplus)
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x) alignas(x)
+#elif (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L) && \
+    !defined(__cplusplus)
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x) _Alignas(x)
+#else
+#define TLSF_MSVC_ALIGN(x)
+#define TLSF_GCC_ALIGN(x)
+#define TLSF_C11C23_ALIGN(x)
+#endif
+
 static size_t PAGE;
 static size_t MAX_PAGES;
 static size_t curr_pages = 0;
@@ -923,6 +947,55 @@ static void static_pool_test(void)
     printf(".");
     fflush(stdout);
 
+    /* Test 5: Aligned reallocation within static pool */
+    {
+        static char pool[65536];
+        tlsf_t t;
+        tlsf_pool_init(&t, pool, sizeof(pool));
+
+        void *p = tlsf_aalloc(&t, 256, 256);
+        assert(p);
+        assert(((size_t) p % 256) == 0);
+        memset(p, 0xAA, 256);
+
+        void *p2 = tlsf_arealloc(&t, p, 256, 512);
+        assert(p2);
+        assert(((size_t) p2 % 256) == 0);
+        {
+            uint8_t *data = (uint8_t *) p2;
+            for (int i = 0; i < 256; i++)
+                assert(data[i] == 0xAA);
+        }
+
+        void *p3 = tlsf_arealloc(&t, p2, 256, 50);
+        assert(p3);
+
+        assert(tlsf_arealloc(&t, p3, 256, 0) == NULL);
+
+        void *p4 = tlsf_arealloc(&t, NULL, 256, 64);
+        assert(p4);
+
+        void *q = tlsf_aalloc(&t, 4096, 4096);
+        assert(q);
+        assert(((size_t) q % 4096) == 0);
+        memset(q, 0xAA, 4096);
+
+        void *q2 = tlsf_arealloc(&t, q, 4096, 8192);
+        assert(q2);
+        assert(((size_t) q2 % 4096) == 0);
+        {
+            uint8_t *data = (uint8_t *) q2;
+            for (int i = 0; i < 4096; i++)
+                assert(data[i] == 0xAA);
+        }
+
+        tlsf_free(&t, p4);
+        tlsf_free(&t, q2);
+        tlsf_check(&t);
+    }
+    printf(".");
+    fflush(stdout);
+
     /* Test 6: Pool too small */
     {
         char tiny[8];
@@ -1121,6 +1194,67 @@ static void calloc_test(void)
 
     void *zero_a = tlsf_calloc(&t, 0, SIZE_MAX);
     void *zero_b = tlsf_calloc(&t, SIZE_MAX, 0);
+    assert(zero_a && zero_b && zero_a != zero_b);
+
+    tlsf_free(&t, zero_b);
+    tlsf_free(&t, zero_a);
+    tlsf_free(&t, p);
+    tlsf_check(&t);
+    printf("done\n");
+}
+
+static void acalloc_test(void)
+{
+    printf("Acalloc test: ");
+    fflush(stdout);
+
+    static unsigned char pool[4096];
+    memset(pool, 0xA5, sizeof(pool));
+
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, sizeof(pool)) > 0);
+
+    tlsf_stats_t before, after;
+    assert(tlsf_get_stats(&t, &before) == 0);
+
+    /* Two wrap targets, each in both operand orders. The 'half' pairs wrap the
+     * product to zero, which tlsf_malloc honors as a minimum-sized request; the
+     * 'wrap' pairs wrap it to 4, which tlsf_malloc would satisfy outright. A
+     * guard that merely rejects a zero product passes the first pair, so the
+     * second pair is what pins the check to the operands rather than the
+     * product.
+     */
+    size_t half = SIZE_MAX / 2 + 1;
+    assert(tlsf_acalloc(&t, 64, half, 2) == NULL);
+    assert(tlsf_acalloc(&t, 64, 2, half) == NULL);
+
+    size_t wrap = SIZE_MAX / 4 + 2;
+    assert(tlsf_acalloc(&t, 64, wrap, 4) == NULL);
+    assert(tlsf_acalloc(&t, 64, 4, wrap) == NULL);
+
+    assert(tlsf_get_stats(&t, &after) == 0);
+    assert(after.total_free == before.total_free);
+    assert(after.largest_free == before.largest_free);
+    assert(after.total_used == before.total_used);
+    assert(after.block_count == before.block_count);
+    assert(after.free_count == before.free_count);
+    assert(after.overhead == before.overhead);
+
+    unsigned char *p = (unsigned char *) tlsf_acalloc(&t, 64, 17, 3);
+    assert(p);
+    assert(((size_t) p % 64) == 0);
+    for (size_t i = 0; i < 51; i++)
+        assert(p[i] == 0);
+
+    /* Drive the inner tlsf_malloc() to failure. The product is representable,
+     * so the overflow guard hands it through, and a fixed pool this size cannot
+     * satisfy it. Nothing else in the suite reaches that arm, which must return
+     * NULL rather than zeroing through a null pointer.
+     */
+    assert(tlsf_acalloc(&t, 64, 1, sizeof(pool) * 16) == NULL);
+
+    void *zero_a = tlsf_acalloc(&t, 64, 0, SIZE_MAX);
+    void *zero_b = tlsf_acalloc(&t, 64, SIZE_MAX, 0);
     assert(zero_a && zero_b && zero_a != zero_b);
 
     tlsf_free(&t, zero_b);
@@ -1864,6 +1998,152 @@ static void pool_reset_test(void)
     printf(". done\n");
 }
 
+/* Test acalloc */
+static void arealloc_test(void)
+{
+    printf("Arealloc test: ");
+    fflush(stdout);
+
+    TLSF_MSVC_ALIGN(128)
+    TLSF_C11C23_ALIGN(128)
+    static unsigned char raw_pool[4096 + 64] TLSF_GCC_ALIGN(128);
+
+    tlsf_t t;
+    unsigned char *pool = raw_pool + 64;
+    assert(tlsf_pool_init(&t, pool, 4096) > 0);
+
+    size_t initial_size = 32;
+    size_t target_align = 128;
+    uint8_t *p_align = (uint8_t *) tlsf_aalloc(&t, 16, initial_size);
+    assert(p_align != NULL && "Allocation failed");
+    assert(((uintptr_t) p_align % target_align) != 0 &&
+           "Test setup error: p_align is accidentally aligned");
+    memset(p_align, 0xDE, initial_size);
+    void *barrier = tlsf_aalloc(&t, target_align, 64);
+    assert(barrier != NULL);
+
+    size_t new_size = 128;
+    void *p_new = tlsf_arealloc(&t, p_align, target_align, new_size);
+    assert(p_new != NULL);
+    assert(((uintptr_t) p_new % target_align) == 0 &&
+           "tlsf_arealloc lost alignment");
+    assert(p_new != p_align && "tlsf_arealloc didn't relocate the block");
+    uint8_t *p_new_bytes = (uint8_t *) p_new;
+    for (size_t i = 0; i < initial_size; i++) {
+        assert(p_new_bytes[i] == 0xDE && "Data corruption during relocation");
+    }
+    tlsf_free(&t, p_new);
+    tlsf_free(&t, barrier);
+
+    /* Non - valid alignment checking */
+    void *p_err_ptr = tlsf_aalloc(&t, 16, 32);
+    void *p_err1 =
+        tlsf_arealloc(&t, p_err_ptr, 7, 32); /* 7 is non power of two */
+    assert(p_err1 == NULL);
+
+    void *p_err2 = tlsf_arealloc(&t, p_err_ptr, 0, 32); /* 0 is not valid */
+    assert(p_err2 == NULL);
+    tlsf_free(&t, p_err_ptr);
+
+    /* Check too large size */
+    void *p_valid = tlsf_aalloc(&t, 16, 32);
+    void *p_err3 = tlsf_arealloc(&t, p_valid, 16, (size_t) -1);
+    assert(p_err3 == NULL);
+    tlsf_free(&t, p_valid);
+
+    /* Out of memory test */
+    void *p_oom = tlsf_aalloc(&t, 16, 32);
+    void *p_filler = tlsf_malloc(&t, 4096 - 2048);
+    /* Try do arealloc for p_oom to larger value,
+     * there is no space available thus tlsf_aalloc will return NULL */
+    void *p_fail = tlsf_arealloc(&t, p_oom, 16, 2048);
+    assert(p_fail == NULL);
+    assert(p_oom != NULL);
+    if (p_filler)
+        tlsf_free(&t, p_filler);
+    tlsf_free(&t, p_oom);
+
+    /* adjust > avail test branch (if sub-branch) */
+    void *p_adjavail = tlsf_aalloc(&t, 32, 32);
+    void *p_if_free_space = tlsf_aalloc(&t, 32, 64);
+    void *p_adjavail_barrier = tlsf_aalloc(&t, 32, 32);
+    tlsf_free(&t, p_if_free_space);
+    memset(p_adjavail, 0xBB, 32);
+    void *p_adjavail_test = tlsf_arealloc(&t, p_adjavail, 32, 64);
+    assert(p_adjavail_test != NULL);
+    assert(p_adjavail_test == p_adjavail);
+    unsigned char *check_merge_ptr = (unsigned char *) p_adjavail_test;
+    for (int i = 0; i < 32; i++) {
+        assert(check_merge_ptr[i] == 0xBB);
+    }
+    tlsf_free(&t, p_adjavail_barrier);
+    tlsf_free(&t, p_adjavail_test);
+
+    /* adjust > avail test branch (else sub-branch) */
+    void *p_else = tlsf_aalloc(&t, 32, 32);
+    void *p_else_barrier = tlsf_aalloc(&t, 32, 32);
+    memset(p_else, 0xAA, 32);
+    void *p_else_test = tlsf_arealloc(&t, p_else, 32, 128);
+    assert(p_else_test != NULL);
+    assert(p_else_test != p_else);
+    unsigned char *check_ptr = (unsigned char *) p_else_test;
+    for (int i = 0; i < 32; i++) {
+        assert(check_ptr[i] == 0xAA);
+    }
+    tlsf_free(&t, p_else_barrier);
+    tlsf_free(&t, p_else_test);
+
+    printf(". done\n");
+}
+
+void arealloc_shrink_with_alignment_change_test(void)
+{
+    printf("Arealloc shrink with alignment change test: ");
+    fflush(stdout);
+
+    TLSF_MSVC_ALIGN(128)
+    TLSF_C11C23_ALIGN(128)
+    static unsigned char raw_pool[8192] TLSF_GCC_ALIGN(128);
+
+    unsigned char *pool = raw_pool + 64;
+
+    tlsf_t t;
+    assert(tlsf_pool_init(&t, pool, 8192 - 64) > 0);
+
+    size_t initial_size = 4096;
+    uint8_t *p_old = (uint8_t *) tlsf_aalloc(&t, 16, initial_size);
+    assert(p_old != NULL);
+
+    memset(p_old, 0xAA, initial_size);
+
+    assert(((uintptr_t) p_old % 128) != 0 &&
+           "Test setup error: p_old is accidentally aligned to 128");
+
+    size_t target_align = 128;
+    size_t new_size = 32;
+    uint8_t *p_new =
+        (uint8_t *) tlsf_arealloc(&t, p_old, target_align, new_size);
+
+    assert(p_new != NULL);
+    assert(((uintptr_t) p_new % target_align) == 0 &&
+           "tlsf_arealloc lost alignment");
+
+    for (size_t i = 0; i < new_size; i++) {
+        assert(p_new[i] == 0xAA &&
+               "Data corrupted inside the new block bounds");
+    }
+
+    void *canary_block = tlsf_aalloc(&t, 16, 256);
+    assert(canary_block != NULL &&
+           "Heap metadata was destroyed by out-of-bounds write!");
+
+    tlsf_free(&t, p_new);
+    tlsf_free(&t, canary_block);
+
+    tlsf_check(&t);
+    printf(". done\n");
+}
+
 int main(void)
 {
     tlsf_t t = TLSF_INIT;
@@ -1897,6 +2177,9 @@ int main(void)
     /* Run zero-initialized allocation test */
     calloc_test();
 
+    /* Run zero-initialized aligned allocation test */
+    acalloc_test();
+
     /* Run pool reset test */
     pool_reset_test();
 
@@ -1918,6 +2201,12 @@ int main(void)
 
     /* Run argument contract test */
     argument_contract_test();
+
+    /* Run arealloc test */
+    arealloc_test();
+
+    /* Run arealloc shrink with alignment change test */
+    arealloc_shrink_with_alignment_change_test();
 
     puts("OK!");
     return 0;

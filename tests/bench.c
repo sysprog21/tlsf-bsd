@@ -110,18 +110,6 @@ static inline void *tlsf_internal_aligned_alloc(size_t size, size_t alignment)
 #define TLSF_ALIGNED_FREE(ptr) (free((ptr)))
 #endif
 
-#if defined(__AVX512F__)
-#define TLSF_ARCH_ALIGNMENT 64
-#elif defined(__AVX2__) || defined(__AVX__)
-#define TLSF_ARCH_ALIGNMENT 32
-#elif defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(_M_ARM) || \
-    defined(_M_ARM64) || defined(__SSE__) || defined(__SSE2__) ||        \
-    defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#define TLSF_ARCH_ALIGNMENT 16
-#else
-#define TLSF_ARCH_ALIGNMENT sizeof(void *)
-#endif
-
 static tlsf_t t = TLSF_INIT_STATIC;
 
 /* Fast xorshift32 PRNG - avoids rand() overhead and mutex in hot loop */

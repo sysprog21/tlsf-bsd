@@ -266,6 +266,59 @@ void *tlsf_thread_realloc(tlsf_thread_t *ts, void *ptr, size_t size)
     return new_ptr;
 }
 
+void *tlsf_thread_arealloc(tlsf_thread_t *ts,
+                           void *ptr,
+                           size_t align,
+                           size_t size)
+{
+    if (!ts)
+        return NULL;
+
+    if (!align || (align & (align - 1)) || align > TLSF_MAX_SIZE)
+        return NULL;
+
+    if (!ptr)
+        return tlsf_thread_aalloc(ts, align, size);
+
+    if (!size) {
+        tlsf_thread_free(ts, ptr);
+        return NULL;
+    }
+
+    int idx = arena_find(ts, ptr);
+    if (idx < 0)
+        return NULL;
+
+    /* Try in-place realloc within the owning arena. We also grab the old usable
+     * size while we hold the lock, in case we need to do a cross-arena
+     * relocation afterwards.
+     */
+    size_t old_size;
+    TLSF_LOCK_ACQUIRE(&ts->arenas[idx].lock);
+    old_size = tlsf_usable_size(ptr);
+    void *new_ptr = tlsf_arealloc(&ts->arenas[idx].pool, ptr, align, size);
+    TLSF_LOCK_RELEASE(&ts->arenas[idx].lock);
+
+    if (new_ptr)
+        return new_ptr;
+
+    /* In-arena realloc failed (arena exhausted for the new size). The old block
+     * is untouched. Allocate from any arena, copy, then free the original.
+     */
+    new_ptr = tlsf_thread_aalloc(ts, align, size);
+    if (!new_ptr)
+        return NULL;
+
+    size_t copy_size = old_size < size ? old_size : size;
+    memcpy(new_ptr, ptr, copy_size);
+
+    TLSF_LOCK_ACQUIRE(&ts->arenas[idx].lock);
+    tlsf_free(&ts->arenas[idx].pool, ptr);
+    TLSF_LOCK_RELEASE(&ts->arenas[idx].lock);
+
+    return new_ptr;
+}
+
 void tlsf_thread_check(tlsf_thread_t *ts)
 {
     if (!ts)

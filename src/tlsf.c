@@ -27,24 +27,25 @@
  *   corresponding Count* trailing and leading zero intrinsics.
  * AUTOMATIC GUARD & NO-CRT COMPILATION (x86/x64 MSVC Only):
  * - By default, if the standard C Runtime is used (_MT is defined), TLSF
- * automatically registers a hardware guard in the CRT initialization section
- * (.CRT$XCU) to verify ABM (lzcnt) support at application startup. If missing,
- * the binary terminates safely via __fastfail.
+ *   automatically registers a hardware guard in the CRT initialization section
+ *   (.CRT$XCU) to verify ABM (lzcnt) support at application startup. If
+ * missing, the binary terminates safely via __fastfail.
  * - This built-in behavior can be completely disabled by defining the macro
  *   TLSF_MSVC_CUSTOM_LZCNT_GUARD. This definition is required and used in two
- * scenarios:
+ *   scenarios:
  *     1. Custom Guard Logic: Alternative validation is required (e.g., to log
  *        an error message or implement a graceful fallback instead of a hard
- * crash).
+ *        crash).
  *     2. No-CRT Environments: The project is compiled without the standard CRT
  *        runtime (e.g., shellcode, kernel drivers, or using /NODEFAULTLIB where
- * _MT is undefined). Since the automatic initialization section cannot be
- * executed here, compilation will fail with a #error unless
- * TLSF_MSVC_CUSTOM_LZCNT_GUARD is defined.
+ *        _MT is undefined). Since the automatic initialization section cannot
+ *        be executed here, compilation will fail with a #error unless
+ *        TLSF_MSVC_CUSTOM_LZCNT_GUARD is defined.
  * - Defining TLSF_MSVC_CUSTOM_LZCNT_GUARD serves as an explicit acknowledgment
- * that the built-in check is bypassed, transferring the responsibility for
- * hardware feature validation to the host application's early initialization
- * stage. On x86/x64, tzcnt and lzcnt are selected by the macro; ARM selects the
+ *   that the built-in check is bypassed, transferring the responsibility for
+ *   hardware feature validation to the host application's early initialization
+ *   stage.
+ * On x86/x64, tzcnt and lzcnt are selected by the macro; ARM selects the
  * corresponding Count* intrinsics instead. GCC and Clang steer the same choice
  * from the command line rather than from a macro: -mbmi for tzcnt, -mlzcnt for
  * lzcnt, or -march=haswell for both. ARM needs no such flag.
@@ -1729,6 +1730,18 @@ void *tlsf_aalloc(tlsf_t *t, size_t align, size_t size)
     return block_use(t, block, adjust);
 }
 
+void *tlsf_acalloc(tlsf_t *t, size_t align, size_t nmemb, size_t size)
+{
+    if (UNLIKELY(nmemb && size > SIZE_MAX / nmemb))
+        return NULL;
+
+    size *= nmemb;
+    void *mem = tlsf_aalloc(t, align, size);
+    if (mem)
+        memset(mem, 0, size);
+    return mem;
+}
+
 void tlsf_free(tlsf_t *t, void *mem)
 {
     if (UNLIKELY(!mem))
@@ -1817,6 +1830,81 @@ void *tlsf_realloc(tlsf_t *t, void *mem, size_t size)
 
     /* Trim the resulting block and return the pointer. */
     block_rtrim_used(t, block, size);
+    return mem;
+}
+
+static void *tlsf_arealloc_relocate(tlsf_t *t,
+                                    void *mem,
+                                    size_t align,
+                                    size_t size,
+                                    size_t avail)
+{
+    void *dst = tlsf_aalloc(t, align, size);
+    if (!dst)
+        return NULL;
+
+    size_t copy_size = (size < avail) ? size : avail;
+
+    /* Copy data from the old block */
+    memcpy(dst, mem, copy_size);
+    tlsf_free(t, mem);
+    return dst;
+}
+
+void *tlsf_arealloc(tlsf_t *t, void *mem, size_t align, size_t size)
+{
+    /* Alignment validation (power of two) */
+    if (UNLIKELY(!align || (align & (align - 1)) || align > TLSF_MAX_SIZE))
+        return NULL;
+
+    if (UNLIKELY(!mem))
+        return tlsf_aalloc(t, align, size);
+
+    /* Zero-size requests are treated as free. */
+    if (UNLIKELY(mem && !size)) {
+        tlsf_free(t, mem);
+        return NULL;
+    }
+
+    /* If alignment is lower than standard one,
+       we can use tlsf_realloc */
+    if (align <= ALIGN_SIZE)
+        return tlsf_realloc(t, mem, size);
+
+    tlsf_block_t *block = block_from_payload(mem);
+    ASSERT(!block_is_free(block), "block already marked as free");
+    size_t avail = block_size(block);
+    size_t adjust = adjust_size(size, ALIGN_SIZE);
+
+    if (UNLIKELY(adjust > TLSF_MAX_SIZE))
+        return NULL;
+
+    /* If current pointer is not aligned for new alignment,
+       we can't use this block in-place. Cause using new allocation */
+    if (((uintptr_t) mem % align) != 0) {
+        return tlsf_arealloc_relocate(t, mem, align, size, avail);
+    }
+
+    /* Is it need to grow the block */
+    if (adjust > avail) {
+        const tlsf_block_t *next = block_next(block);
+
+        /* Growing only forward. In contrast of realloc,
+           expand_prev is impossible, cause it will
+           shift block start and break `mem` alignment */
+        if (block_is_free(next) &&
+            adjust <= avail + block_size(next) + BLOCK_OVERHEAD) {
+            block_merge_next(t, block);
+            ASAN_UNPOISON(block_payload(block), block_size(block));
+            block_set_prev_free(block_next(block), false);
+        } else {
+            /* Relocation with specified alignment */
+            return tlsf_arealloc_relocate(t, mem, align, size, avail);
+        }
+    }
+
+    /* trim from the right */
+    block_rtrim_used(t, block, adjust);
     return mem;
 }
 

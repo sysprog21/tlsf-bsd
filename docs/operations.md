@@ -213,6 +213,8 @@ caller layered on top will run.
 | `tlsf_free` | O(1) | at most two merges, one insert |
 | `tlsf_realloc` | O(1) forward or shrink | backward growth and relocation each copy the payload once |
 | `tlsf_aalloc` | O(1) | one extra split at the front |
+| `tlsf_acalloc` | O(1) + O(bytes) | `tlsf_aalloc` plus zeroing the requested bytes |
+| `tlsf_arealloc` | O(1) forward or shrink | no backward growth (it would break alignment); forward growth is in place, and relocation copies the payload once, also when the pointer is misaligned for the new alignment |
 | `tlsf_usable_size` | O(1) | one header read |
 | `tlsf_append_pool` | O(1) | one merge, one sentinel write |
 | `tlsf_pool_init` | O(FL_COUNT x SL_COUNT) | 1024 bin heads by default |

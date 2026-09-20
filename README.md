@@ -114,10 +114,13 @@ tlsf_t t = TLSF_INIT;
 void *p = tlsf_malloc(&t, 256);
 void *z = tlsf_calloc(&t, 4, 64);
 void *q = tlsf_aalloc(&t, 64, 256);   /* 64-byte aligned */
+void *h = tlsf_acalloc(&t, 64, 4, 32); /* 64-byte aligned */ 
 p = tlsf_realloc(&t, p, 512);
+q = tlsf_arealloc(&t, q, 64, 256);
 tlsf_free(&t, p);
 tlsf_free(&t, z);
 tlsf_free(&t, q);
+tlsf_free(&t, h);
 
 /* Static pool (fixed-size): no tlsf_resize() needed */
 char pool[1 << 20];
@@ -136,6 +139,8 @@ tlsf_free(&s, r);
 | `tlsf_free(t, ptr)` | Free a previously allocated block. NULL is a no-op. |
 | `tlsf_realloc(t, ptr, size)` | Resize allocation. Tries in-place expansion before relocating. |
 | `tlsf_aalloc(t, align, size)` | Allocate with alignment. `align` must be a power of two. |
+| `tlsf_acalloc(t, align, nmemb, size)` | Allocate an aligned array and zero its requested bytes. Multiplication overflow returns NULL. |
+| `tlsf_arealloc(t, ptr, align, size)` | Resize aligned allocation. Tries in-place expansion before relocating. |
 | `tlsf_pool_init(t, mem, bytes)` | Initialize a fixed-size pool. Returns usable bytes, 0 on failure. |
 | `tlsf_append_pool(t, mem, size)` | Extend pool with adjacent memory. Returns bytes used, 0 on failure. |
 | `tlsf_resize(t, size)` | Platform callback for dynamic pool growth (weak symbol). |
@@ -158,6 +163,7 @@ size_t usable = tlsf_thread_init(&ts, pool, sizeof(pool));
 void *p = tlsf_thread_malloc(&ts, 256);
 void *q = tlsf_thread_aalloc(&ts, 64, 256);
 p = tlsf_thread_realloc(&ts, p, 512);
+q = tlsf_thread_arealloc(&ts, q, 64, 256);
 tlsf_thread_free(&ts, p);
 tlsf_thread_free(&ts, q);
 tlsf_thread_destroy(&ts);
@@ -170,6 +176,7 @@ tlsf_thread_destroy(&ts);
 | `tlsf_thread_malloc(ts, size)` | Thread-safe malloc with per-arena locking. |
 | `tlsf_thread_aalloc(ts, align, size)` | Thread-safe aligned allocation. |
 | `tlsf_thread_realloc(ts, ptr, size)` | Thread-safe realloc. In-place first, cross-arena fallback. |
+| `tlsf_thread_arealloc(ts, ptr, align, size)` | Thread-safe aligned realloc. In-place first, cross-arena fallback. |
 | `tlsf_thread_free(ts, ptr)` | Thread-safe free. Finds owning arena automatically. |
 | `tlsf_thread_check(ts)` | Heap consistency check across all arenas. |
 | `tlsf_thread_stats(ts, stats)` | Aggregate statistics across all arenas. |

@@ -252,7 +252,22 @@ static TLSF_THREAD_CONVENTION aligned_thread_func(void *arg)
         if (p) {
             assert(((uintptr_t) p % align) == 0);
             memset(p, id & 0xFF, sz);
-            tlsf_thread_free(&ts, p);
+            size_t new_sz = (size_t) (TLSF_RAND(&seed) % 512) + 1;
+            void *q = tlsf_thread_arealloc(&ts, p, align, new_sz);
+            if (q) {
+                assert(((uintptr_t) q % align) == 0 &&
+                       "tlsf_thread_arealloc lost alignment");
+                size_t check_sz = (sz < new_sz) ? sz : new_sz;
+                unsigned char *data = (unsigned char *) q;
+                unsigned char expected_byte = (unsigned char) (id & 0xFF);
+                for (size_t i = 0; i < check_sz; i++) {
+                    assert(data[i] == expected_byte &&
+                           "tlsf_thread_arealloc corrupted payload");
+                }
+                tlsf_thread_free(&ts, q);
+            } else {
+                tlsf_thread_free(&ts, p);
+            }
         }
     }
     return TLSF_THREAD_RETURN;
@@ -358,6 +373,17 @@ static void basic_test(void)
         assert(data[i] == 0xBB);
     tlsf_thread_free(&ts, q);
 
+    /* arealloc */
+    p = tlsf_thread_aalloc(&ts, 256, 50);
+    assert(p);
+    memset(p, 0xBB, 50);
+    q = tlsf_thread_arealloc(&ts, p, 256, 200);
+    assert(q);
+    data = (uint8_t *) q;
+    for (int i = 0; i < 50; i++)
+        assert(data[i] == 0xBB);
+    tlsf_thread_free(&ts, q);
+
     /* realloc NULL -> malloc */
     p = tlsf_thread_realloc(&ts, NULL, 64);
     assert(p);
@@ -367,6 +393,12 @@ static void basic_test(void)
     p = tlsf_thread_malloc(&ts, 32);
     assert(p);
     q = tlsf_thread_realloc(&ts, p, 0);
+    assert(q == NULL);
+
+    /* arealloc ptr, 0 -> free */
+    p = tlsf_thread_aalloc(&ts, 256, 32);
+    assert(p);
+    q = tlsf_thread_arealloc(&ts, p, 256, 0);
     assert(q == NULL);
 
     /* free NULL is a no-op */

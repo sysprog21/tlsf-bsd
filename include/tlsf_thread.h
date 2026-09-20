@@ -336,10 +336,21 @@ TLSF_STATIC_ASSERT((TLSF_CACHELINE_SIZE & (TLSF_CACHELINE_SIZE - 1)) == 0,
 #define tlsf_thread_malloc _TLSF_THREAD_ABI(tlsf_thread_malloc)
 #define tlsf_thread_aalloc _TLSF_THREAD_ABI(tlsf_thread_aalloc)
 #define tlsf_thread_realloc _TLSF_THREAD_ABI(tlsf_thread_realloc)
+#define tlsf_thread_arealloc _TLSF_THREAD_ABI(tlsf_thread_arealloc)
 #define tlsf_thread_free _TLSF_THREAD_ABI(tlsf_thread_free)
 #define tlsf_thread_check _TLSF_THREAD_ABI(tlsf_thread_check)
 #define tlsf_thread_stats _TLSF_THREAD_ABI(tlsf_thread_stats)
 #define tlsf_thread_reset _TLSF_THREAD_ABI(tlsf_thread_reset)
+#endif
+
+/* Macros for native architecture alignment alloctions */
+#ifndef TLSF_NATIVE_THREAD_AALLOC
+#define TLSF_NATIVE_THREAD_AALLOC(t, size) \
+    (tlsf_thread_aalloc((t), TLSF_ARCH_ALIGNMENT, (size)))
+#endif
+#ifndef TLSF_NATIVE_THREAD_AREALLOC
+#define TLSF_NATIVE_THREAD_AREALLOC(t, mem, size) \
+    (tlsf_thread_arealloc((t), (mem), TLSF_ARCH_ALIGNMENT, (size)))
 #endif
 
 /* Everything above is includes, macros and static assertions, none of which
@@ -432,6 +443,21 @@ void *tlsf_thread_aalloc(tlsf_thread_t *ts, size_t align, size_t size);
  * pointer need not equal @ptr.
  */
 void *tlsf_thread_realloc(tlsf_thread_t *ts, void *ptr, size_t size);
+
+/**
+ * Thread-safe aligned realloc. Tries to resize inside the owning arena,
+ * then falls back o allocating elsewhere, copying, and freeing the original.
+ * @align must be a non-zero power of two;
+ *
+ * A NULL @ptr allocates, and a zero @size frees @ptr and returns NULL. A @ptr
+ * outside every arena range returns NULL and frees nothing. As with
+ * tlsf_arealloc(), a failure leaves @ptr allocated and intact, and the returned
+ * pointer need not equal @ptr.
+ */
+void *tlsf_thread_arealloc(tlsf_thread_t *ts,
+                           void *ptr,
+                           size_t align,
+                           size_t size);
 
 /**
  * Thread-safe free. Locates the owning arena by scanning the arena address
